@@ -9,9 +9,6 @@ class TestGraph(TestCase):
     def assert_vertex(self, resource_vertex, resource):
         resource_name = f'{resource["kind"]}.{resource["metadata"].get("namespace", "default")}.{resource["metadata"]["name"]}'
         config = deepcopy(resource)
-        config.pop('apiVersion')
-        config.pop('kind')
-        config.pop('metadata')
         attributes = deepcopy(config)
         enrich_attributes(attributes, resource)
 
@@ -40,5 +37,3 @@ def enrich_attributes(attributes, resource):
     attributes["__startline__"] = resource["__startline__"]
     attributes["__endline__"] = resource["__endline__"]
     attributes.update(extract_inner_attributes(attributes))
-
-

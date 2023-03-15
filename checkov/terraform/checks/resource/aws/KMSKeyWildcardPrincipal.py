@@ -1,11 +1,9 @@
 from checkov.common.models.enums import CheckResult, CheckCategories
 from checkov.terraform.checks.resource.base_resource_check import BaseResourceCheck
 from checkov.common.util.type_forcers import force_list
-import json
 
 
 class KMSKeyWildcardPrincipal(BaseResourceCheck):
-
     def __init__(self):
         name = "Ensure KMS key policy does not contain wildcard (*) principal"
         id = "CKV_AWS_33"
@@ -36,7 +34,7 @@ class KMSKeyWildcardPrincipal(BaseResourceCheck):
                             idx_evaluated_key = f'[{idx}]/' if isinstance(policy_block['Statement'], list) else ''
                             self.evaluated_keys = [f'policy/[0]/Statement/{idx_evaluated_key}Principal']
                             return CheckResult.FAILED
-        except:  # nosec
+        except Exception:  # nosec
             pass
         return CheckResult.PASSED
 

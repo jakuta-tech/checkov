@@ -13,17 +13,26 @@ class TestCloudformationGraphManager(TestCase):
     def test_build_graph_from_source_directory_no_rendering(self):
         root_dir = os.path.realpath(os.path.join(TEST_DIRNAME, "./runner/resources"))
         graph_manager = CloudformationGraphManager(db_connector=NetworkxConnector())
-        local_graph, definitions = graph_manager.build_graph_from_source_directory(root_dir, render_variables=False)
+        local_graph, definitions = graph_manager.build_graph_from_source_directory(root_dir, render_variables=False,
+                                                                                   excluded_paths=["skip.*"])
 
         expected_resources_by_file = {
+            os.path.join(root_dir, "no_properties.yaml"): [
+                "AWS::Serverless::Function.NoPropertiesYaml"
+            ],
+            os.path.join(root_dir, "no_properties.json"): [
+                "AWS::Serverless::Function.NoPropertiesJson"
+            ],
             os.path.join(root_dir, "tags.yaml"): [
                 "AWS::S3::Bucket.DataBucket",
                 "AWS::S3::Bucket.NoTags",
                 "AWS::EKS::Nodegroup.EKSClusterNodegroup",
-                "AWS::AutoScaling::AutoScalingGroup.TerraformServerAutoScalingGroup"],
+                "AWS::AutoScaling::AutoScalingGroup.TerraformServerAutoScalingGroup",
+            ],
             os.path.join(root_dir, "cfn_newline_at_end.yaml"): [
                 "AWS::RDS::DBInstance.MyDB",
-                "AWS::S3::Bucket.MyBucket"],
+                "AWS::S3::Bucket.MyBucket",
+            ],
             os.path.join(root_dir, "success.json"): [
                 "AWS::S3::Bucket.acmeCWSBucket",
                 "AWS::S3::Bucket.acmeCWSBucket2",
@@ -39,13 +48,19 @@ class TestCloudformationGraphManager(TestCase):
                 "AWS::IAM::Role.acmeCWSSACrossAccountAccessRole",
                 "AWS::EKS::Cluster.eksCluster",
                 "Custom::acmeSnsCustomResource.acmeSnsCustomResource",
-                ],
+            ],
             os.path.join(root_dir, "fail.yaml"): [
-                "AWS::SQS::Queue.UnencryptedQueue"
+                "AWS::SQS::Queue.UnencryptedQueue",
+            ],
+            os.path.join(root_dir, "graph.yaml"): [
+                "AWS::AppSync::GraphQLApi.GoodAppSyncGraphQLApi",
+                "AWS::WAFv2::WebACL.GoodWAFv2WebACL",
+                "AWS::WAFv2::WebACLAssociation.WebACLAssociation",
+                "AWS::AppSync::GraphQLApi.NoWAFAppSyncGraphQLApi"
             ]
         }
-        self.assertEqual(41, len(local_graph.vertices))
-        self.assertEqual(21, len(local_graph.vertices_by_block_type[BlockType.RESOURCE]))
+        self.assertEqual(47, len(local_graph.vertices))
+        self.assertEqual(27, len(local_graph.vertices_by_block_type[BlockType.RESOURCE]))
         self.assertEqual(9, len(local_graph.vertices_by_block_type[BlockType.PARAMETERS]))
         self.assertEqual(6, len(local_graph.vertices_by_block_type[BlockType.OUTPUTS]))
         self.assertEqual(4, len(local_graph.vertices_by_block_type[BlockType.CONDITIONS]))

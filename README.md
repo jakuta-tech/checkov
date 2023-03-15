@@ -1,5 +1,3 @@
-[![Hacktoberfest](docs/web/images/Hacktoberfest-1.png)](https://bridgecrew.io/blog/happy-hacktoberfest-2021/?utm_source=github&utm_medium=organic_oss&utm_campaign=checkov)
-
 [![checkov](https://raw.githubusercontent.com/bridgecrewio/checkov/master/docs/web/images/checkov_by_bridgecrew.png)](#)
        
 [![Maintained by Bridgecrew.io](https://img.shields.io/badge/maintained%20by-bridgecrew.io-blueviolet)](https://bridgecrew.io/?utm_source=github&utm_medium=organic_oss&utm_campaign=checkov)
@@ -8,15 +6,18 @@
 [![code_coverage](https://raw.githubusercontent.com/bridgecrewio/checkov/master/coverage.svg?sanitize=true)](https://github.com/bridgecrewio/checkov/actions?query=workflow%3Acoverage) 
 [![docs](https://img.shields.io/badge/docs-passing-brightgreen)](https://www.checkov.io/1.Welcome/What%20is%20Checkov.html?utm_source=github&utm_medium=organic_oss&utm_campaign=checkov)
 [![PyPI](https://img.shields.io/pypi/v/checkov)](https://pypi.org/project/checkov/)
-[![Python Version](https://img.shields.io/github/pipenv/locked/python-version/bridgecrewio/checkov)](#)
+[![Python Version](https://img.shields.io/pypi/pyversions/checkov)](#)
 [![Terraform Version](https://img.shields.io/badge/tf-%3E%3D0.12.0-blue.svg)](#)
 [![Downloads](https://pepy.tech/badge/checkov)](https://pepy.tech/project/checkov)
+[![Docker Pulls](https://img.shields.io/docker/pulls/bridgecrew/checkov.svg)](https://hub.docker.com/r/bridgecrew/checkov)
 [![slack-community](https://img.shields.io/badge/Slack-4A154B?style=plastic&logo=slack&logoColor=white)](https://slack.bridgecrew.io/)
  
 
-**Checkov** is a static code analysis tool for infrastructure-as-code.
+**Checkov** is a static code analysis tool for infrastructure as code (IaC) and also a software composition analysis (SCA) tool for images and open source packages.
 
-It scans cloud infrastructure provisioned using [Terraform](https://terraform.io/), Terraform plan, [Cloudformation](https://aws.amazon.com/cloudformation/), [AWS SAM](https://aws.amazon.com/serverless/sam/), [Kubernetes](https://kubernetes.io/), [Dockerfile](https://www.docker.com/),  [Serverless](https://www.serverless.com/) or [ARM Templates](https://docs.microsoft.com/en-us/azure/azure-resource-manager/templates/overview) and detects security and compliance misconfigurations using graph-based scanning.
+It scans cloud infrastructure provisioned using [Terraform](https://terraform.io/), [Terraform plan](docs/7.Scan%20Examples/Terraform%20Plan%20Scanning.md), [Cloudformation](docs/7.Scan%20Examples/Cloudformation.md), [AWS SAM](docs/7.Scan%20Examples/AWS%20SAM.md), [Kubernetes](docs/7.Scan%20Examples/Kubernetes.md), [Helm charts](docs/7.Scan%20Examples/Helm.md), [Kustomize](docs/7.Scan%20Examples/Kustomize.md), [Dockerfile](docs/7.Scan%20Examples/Dockerfile.md),  [Serverless](docs/7.Scan%20Examples/Serverless%20Framework.md), [Bicep](docs/7.Scan%20Examples/Bicep.md), [OpenAPI](docs/7.Scan%20Examples/OpenAPI.md) or [ARM Templates](docs/7.Scan%20Examples/Azure%20ARM%20templates.md) and detects security and compliance misconfigurations using graph-based scanning.
+
+It performs [Software Composition Analysis (SCA) scanning](docs/7.Scan%20Examples/Sca.md) which is a scan of open source packages and images for Common Vulnerabilities and Exposures (CVEs).
  
 Checkov also powers [**Bridgecrew**](https://bridgecrew.io/?utm_source=github&utm_medium=organic_oss&utm_campaign=checkov), the developer-first platform that codifies and streamlines cloud security throughout the development lifecycle. Bridgecrew identifies, fixes, and prevents misconfigurations in cloud resources and infrastructure-as-code files. 
 
@@ -40,7 +41,8 @@ Checkov also powers [**Bridgecrew**](https://bridgecrew.io/?utm_source=github&ut
  ## Features
 
  * [Over 1000 built-in policies](docs/5.Policy%20Index/all.md) cover security and compliance best practices for AWS, Azure and Google Cloud.
- * Scans Terraform, Terraform Plan, CloudFormation, AWS SAM, Kubernetes, Dockerfile, Serverless framework and ARM template files.
+ * Scans Terraform, Terraform Plan, CloudFormation, AWS SAM, Kubernetes, Dockerfile, Serverless framework, Bicep and ARM template files.
+ * Scans Argo Workflows, Azure Pipelines, BitBucket Pipelines, Circle CI Pipelines, GitHub Actions and GitLab CI workflow files
  * Supports Context-awareness policies based on in-memory graph-based scanning.
  * Supports Python format for attribute policies and YAML format for both attribute and composite policies.
  * Detects [AWS credentials](docs/2.Basics/Scanning%20Credentials%20and%20Secrets.md) in EC2 Userdata, Lambda environment variables and Terraform providers.
@@ -48,7 +50,7 @@ Checkov also powers [**Bridgecrew**](https://bridgecrew.io/?utm_source=github&ut
  * Evaluates [Terraform Provider](https://registry.terraform.io/browse/providers) settings to regulate the creation, management, and updates of IaaS, PaaS or SaaS managed through Terraform.
  * Policies support evaluation of [variables](docs/2.Basics/Handling%20Variables.md) to their optional default value.
  * Supports in-line [suppression](docs/2.Basics/Suppressing%20and%20Skipping%20Policies.md) of accepted risks or false-positives to reduce recurring scan failures. Also supports global skip from using CLI.
- * [Output](docs/2.Basics/Reviewing%20Scan%20Results.md) currently available as CLI, [CycloneDX](https://cyclonedx.org), JSON, JUnit XML and github markdown and link to remediation [guides](https://docs.bridgecrew.io/docs/aws-policy-index).
+ * [Output](docs/2.Basics/Reviewing%20Scan%20Results.md) currently available as CLI, [CycloneDX](https://cyclonedx.org), JSON, JUnit XML, CSV, SARIF and github markdown and link to remediation [guides](https://docs.bridgecrew.io/docs/aws-policy-index).
  
 ## Screenshots
 
@@ -91,7 +93,7 @@ sudo apt install python3-pip
 sudo python3.7 -m pip install -U checkov #to install or upgrade checkov)
 ```
 
-or using homebrew (MacOS only)
+or using [homebrew](https://formulae.brew.sh/formula/checkov) (macOS or Linux)
 
 ```sh
 brew install checkov
@@ -103,6 +105,10 @@ or
 brew upgrade checkov
 ```
 
+### Enabling bash autocomplete
+```sh
+source <(register-python-argcomplete checkov)
+```
 ### Upgrade
 
 if you installed checkov with pip3
@@ -186,28 +192,27 @@ Start using Checkov by reading the [Getting Started](docs/1.Welcome/Quick%20Star
 
 ```sh
 docker pull bridgecrew/checkov
-docker run --tty --volume /user/tf:/tf bridgecrew/checkov --directory /tf
+docker run --tty --rm --volume /user/tf:/tf --workdir /tf bridgecrew/checkov --directory /tf
 ```
 Note: if you are using Python 3.6(Default version in Ubuntu 18.04) checkov will not work and it will fail with `ModuleNotFoundError: No module named 'dataclasses'`  error message. In this case, you can use the docker version instead.
 
 Note that there are certain cases where redirecting `docker run --tty` output to a file - for example, if you want to save the Checkov JUnit output to a file - will cause extra control characters to be printed. This can break file parsing. If you encounter this, remove the `--tty` flag.
 
+The `--workdir /tf` flag is optional to change the working directory to the mounted volume. If you are using the SARIF output `-o sarif` this will output the results.sarif file to the mounted volume (`/user/tf` in the example above). If you do not include that flag, the working directory will be "/".
+
 ### Running or skipping checks 
 
-Using command line flags you can specify to run only named checks (allow list) or run all checks except 
-those listed (deny list).
+By using command line flags, you can specify to run only named checks (allow list) or run all checks except 
+those listed (deny list). If you are using the platform integration via API key, you can also specify a severity threshold to skip and / or include. See the docs for more detailed information about how these flags work together.
 
-List available checks:
-```sh
-checkov --list 
-```
+## Examples
 
-Allow only 2 checks to run: 
+Allow only the two specified checks to run: 
 ```sh
 checkov --directory . --check CKV_AWS_20,CKV_AWS_57
 ```
 
-Run all checks except 1 specified:
+Run all checks except the one specified:
 ```sh
 checkov -d . --skip-check CKV_AWS_20
 ```
@@ -217,11 +222,64 @@ Run all checks except checks with specified patterns:
 checkov -d . --skip-check CKV_AWS*
 ```
 
+Run all checks that are MEDIUM severity or higher (requires API key):
+```sh
+checkov -d . --check MEDIUM --bc-api-key ...
+```
+
+Run all checks that are MEDIUM severity or higher, as well as check CKV_123 (assume this is a LOW severity check):
+```sh
+checkov -d . --check MEDIUM,CKV_123 --bc-api-key ...
+```
+
+Skip all checks that are MEDIUM severity or lower:
+```sh
+checkov -d . --skip-check MEDIUM --bc-api-key ...
+```
+
+Skip all checks that are MEDIUM severity or lower, as well as check CKV_789 (assume this is a high severity check):
+```sh
+checkov -d . --skip-check MEDIUM,CKV_789 --bc-api-key ...
+```
+
+Run all checks that are MEDIUM severity or higher, but skip check CKV_123 (assume this is a medium or higher severity check):
+```sh
+checkov -d . --check MEDIUM --skip-check CKV_123 --bc-api-key ...
+```
+
+Run check CKV_789, but skip it if it is a medium severity (the --check logic is always applied before --skip-check)
+```sh
+checkov -d . --skip-check MEDIUM --check CKV_789 --bc-api-key ...
+```
+
 For Kubernetes workloads, you can also use allow/deny namespaces.  For example, do not report any results for the 
 kube-system namespace:
 ```sh
 checkov -d . --skip-check kube-system
 ```
+
+Run a scan of a container image. First pull or build the image then refer to it by the hash, ID, or name:tag:
+```sh
+checkov --framework sca_image --docker-image sha256:1234example --dockerfile-path /Users/path/to/Dockerfile --bc-api-key ...
+
+checkov --docker-image <image-name>:tag --dockerfile-path /User/path/to/Dockerfile --bc-api-key ...
+```
+
+Run an SCA scan of packages in a repo:
+```sh
+checkov -d . --framework sca_package --bc-api-key ... --repo-id <repo_id(arbitrary)>
+```
+
+Run a scan of a directory with environment variables removing buffering, adding debug level logs, turning on image referencer:
+```sh
+PYTHONUNBUFFERED=1 LOG_LEVEL=DEBUG CHECKOV_EXPERIMENTAL_IMAGE_REFERENCING=TRUE checkov -d .
+```
+OR enable the environment variables for multiple runs
+```sh
+export PYTHONUNBUFFERED=1 LOG_LEVEL=DEBUG CHECKOV_EXPERIMENTAL_IMAGE_REFERENCING=TRUE
+checkov -d .
+```
+
 
 ### Suppressing/Ignoring a check
 
@@ -306,6 +364,11 @@ To cancel skipping directories beginning with `.` override `IGNORE_HIDDEN_DIRECT
 You can override the default set of directories to skip by setting the environment variable `CKV_IGNORED_DIRECTORIES`.
  Note that if you want to preserve this list and add to it, you must include these values. For example, `CKV_IGNORED_DIRECTORIES=mynewdir` will skip only that directory, but not the others mentioned above. This variable is legacy functionality; we recommend using the `--skip-file` flag.
 
+#### Console Output
+
+The console output is in colour by default, to switch to a monochrome output, set the environment variable:
+`ANSI_COLORS_DISABLED`
+
 #### VSCODE Extension
 
 If you want to use checkov's within vscode, give a try to the vscode extension available at [vscode](https://marketplace.visualstudio.com/items?itemName=Bridgecrew.checkov)
@@ -379,12 +442,15 @@ Defaults:
   --external-modules-download-path:.external_modules
   --evaluate-variables:True
 ```
-
 ## Contributing
 
 Contribution is welcomed! 
 
 Start by reviewing the [contribution guidelines](CONTRIBUTING.md). After that, take a look at a [good first issue](https://github.com/bridgecrewio/checkov/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
+
+You can even start this with one-click dev in your browser through Gitpod at the following link:
+
+[![Open in Gitpod](https://gitpod.io/button/open-in-gitpod.svg)](https://gitpod.io/#https://github.com/bridgecrewio/checkov)
 
 Looking to contribute new checks? Learn how to write a new check (AKA policy) [here](docs/6.Contribution/Contribution%20Overview.md).
 

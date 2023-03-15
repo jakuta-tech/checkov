@@ -1,9 +1,8 @@
-import os
 import pprint
 from typing import List, Tuple
 from unittest import TestCase
 
-from checkov.terraform.graph_builder.graph_components.attribute_names import CustomAttributes
+from checkov.common.graph.graph_builder.graph_components.attribute_names import CustomAttributes
 from checkov.terraform.graph_builder.graph_components.block_types import BlockType
 from checkov.terraform.graph_builder.utils import get_referenced_vertices_in_value, \
     replace_map_attribute_access_with_dot, generate_possible_strings_from_wildcards, \
@@ -20,22 +19,22 @@ class TestUtils(TestCase):
         self.assertEqual(expected, get_referenced_vertices_in_value(str_value, aliases, []))
 
         str_values = [
-                    'var.x',
-                      'format("-%s", var.x)',
-                      '../child',
-                      'aws_instance.example.id',
-                      'bc_c_${var.customer_name}',
-                      'aws iam delete-role --role-name ${local.role_name} --profile ${var.profile} --region ${var.region}',
-                      'length(aws_vpc.main) > 0 ? aws_vpc.main[0].cidr_block : ${var.x}',
-                    ]
-        expected =   [
-                    [TerraformVertexReference(BlockType.VARIABLE, ['x'], 'var.x')],
-                      [TerraformVertexReference(BlockType.VARIABLE, ['x'], 'var.x')],
-                      [],
-                      [TerraformVertexReference(BlockType.RESOURCE, ['aws_instance.example', 'id'], 'aws_instance.example.id')],
-                      [TerraformVertexReference(BlockType.VARIABLE, ['customer_name'], 'var.customer_name')],
-                      [TerraformVertexReference(BlockType.LOCALS, ['role_name'], 'local.role_name'), TerraformVertexReference(BlockType.VARIABLE, ['profile'], 'var.profile'), TerraformVertexReference(BlockType.VARIABLE, ['region'], 'var.region')],
-                      [TerraformVertexReference(BlockType.RESOURCE, ['aws_vpc.main'], 'aws_vpc.main'), TerraformVertexReference(BlockType.RESOURCE, ['aws_vpc.main', 'cidr_block'], 'aws_vpc.main.cidr_block'), TerraformVertexReference(BlockType.VARIABLE, ['x'], 'var.x')],
+            'var.x',
+            'format("-%s", var.x)',
+            '../child',
+            'aws_instance.example.id',
+            'bc_c_${var.customer_name}',
+            'aws iam delete-role --role-name ${local.role_name} --profile ${var.profile} --region ${var.region}',
+            'length(aws_vpc.main) > 0 ? aws_vpc.main[0].cidr_block : ${var.x}',
+        ]
+        expected = [
+            [TerraformVertexReference(BlockType.VARIABLE, ['x'], 'var.x')],
+            [TerraformVertexReference(BlockType.VARIABLE, ['x'], 'var.x')],
+            [],
+            [TerraformVertexReference(BlockType.RESOURCE, ['aws_instance.example', 'id'], 'aws_instance.example.id')],
+            [TerraformVertexReference(BlockType.VARIABLE, ['customer_name'], 'var.customer_name')],
+            [TerraformVertexReference(BlockType.LOCALS, ['role_name'], 'local.role_name'), TerraformVertexReference(BlockType.VARIABLE, ['profile'], 'var.profile'), TerraformVertexReference(BlockType.VARIABLE, ['region'], 'var.region')],
+            [TerraformVertexReference(BlockType.RESOURCE, ['aws_vpc.main'], 'aws_vpc.main'), TerraformVertexReference(BlockType.RESOURCE, ['aws_vpc.main', 'cidr_block'], 'aws_vpc.main.cidr_block'), TerraformVertexReference(BlockType.VARIABLE, ['x'], 'var.x')],
         ]
 
         for i in range(0, len(str_values)):
@@ -181,4 +180,3 @@ class TestUtils(TestCase):
         self.assertTrue(attribute_has_nested_attributes(attribute_key='filter', attributes=attributes))
         self.assertTrue(attribute_has_nested_attributes(attribute_key='filter.1.values', attributes=attributes))
         self.assertFalse(attribute_has_nested_attributes(attribute_key='filter.1.values.0', attributes=attributes))
-

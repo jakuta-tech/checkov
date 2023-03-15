@@ -11,14 +11,8 @@ class PeerClientCertAuthTrue(BaseK8Check):
         categories = [CheckCategories.KUBERNETES]
         super().__init__(name=name, id=id, categories=categories, supported_entities=supported_kind)
 
-    def get_resource_id(self, conf):
-        if "namespace" in conf["metadata"]:
-            return "{}.{}.{}".format(conf["kind"], conf["metadata"]["name"], conf["metadata"]["namespace"])
-        else:
-            return "{}.{}.default".format(conf["kind"], conf["metadata"]["name"])
-
     def scan_spec_conf(self, conf, entity_type=None):
-        if conf.get("metadata")['name'] == 'etcd':
+        if conf.get("metadata", {}).get('name') == 'etcd':
             containers = conf.get('spec')['containers']
             for container in containers:
                 if container.get("args") is not None:

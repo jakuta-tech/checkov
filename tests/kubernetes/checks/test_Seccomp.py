@@ -19,23 +19,24 @@ class TestSeccomp(unittest.TestCase):
         passed_resources = [check.resource for check in report.passed_checks]
         failed_resources = [check.resource for check in report.failed_checks]
 
-        self.assertEqual(summary["passed"], 7)
+        self.assertEqual(summary["passed"], 8)
         self.assertEqual(summary["failed"], 2)
         self.assertEqual(summary["skipped"], 0)
         self.assertEqual(summary["parsing_errors"], 0)
 
         expected_passed_resources = [
-            "CronJob.cronjob-passed.default",
-            "Deployment.seccomp-passed-deployment.default",
-            "Deployment.seccomp-passed-metadata-annotations.default",
-            "Pod.seccomp-passed-metadata-annotations-docker.default",
-            "Pod.seccomp-passed-metadata-annotations-runtime.default",
-            "Pod.seccomp-passed-security-context.default",
-            "StatefulSet.RELEASE-NAME.default",
+            "CronJob.default.cronjob-passed",
+            "CronJob.default.cronjob-securityContext-passed",
+            "Deployment.default.seccomp-passed-deployment",
+            "Deployment.default.seccomp-passed-metadata-annotations",
+            "Pod.default.seccomp-passed-metadata-annotations-docker",
+            "Pod.default.seccomp-passed-metadata-annotations-runtime",
+            "Pod.default.seccomp-passed-security-context",
+            "StatefulSet.default.RELEASE-NAME",
         ]
         expected_failed_resources = [
-            "Deployment.app-cert-manager.infra",
-            "Pod.seccomp-failed.default",
+            "Deployment.infra.app-cert-manager",
+            "Pod.default.seccomp-failed",
         ]
         self.assertCountEqual(expected_passed_resources, passed_resources)
         self.assertCountEqual(expected_failed_resources, failed_resources)

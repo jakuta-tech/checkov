@@ -11,7 +11,7 @@ class TestModuleFinder(unittest.TestCase):
     @staticmethod
     def get_src_dir():
         cur_dir = os.path.abspath(os.path.dirname(__file__))
-        return os.path.join(cur_dir, 'data', 'tf_module_downloader')
+        return os.path.join(cur_dir, 'data', 'tf_module_downloader', 'public_modules')
 
     def test_module_finder(self):
         modules = find_modules(self.get_src_dir())
@@ -20,9 +20,16 @@ class TestModuleFinder(unittest.TestCase):
         self.assertEqual(1, len(remote_modules))
         for m in remote_modules:
             if 'terraform-aws-modules' in m.module_link:
-                self.assertEqual('2.1.0', m.version)
+                self.assertEqual('~>2.1.0', m.version)
             else:
                 self.assertIsNone(m.version)
+
+    def test_module_finder_ignore_comments(self):
+        modules = find_modules(self.get_src_dir())
+        module_list = list(map(lambda mod: mod.module_link, modules))
+        for m in module_list:
+            self.assertIn(m, ["terraform-aws-modules/s3-bucket/aws",
+                              "../../../../../../../platform/src/stacks/accountStack"])
 
     def test_downloader(self):
         modules = find_modules(self.get_src_dir())

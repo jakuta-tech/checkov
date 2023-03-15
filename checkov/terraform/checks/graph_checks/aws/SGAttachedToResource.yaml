@@ -31,6 +31,7 @@ definition:
         - aws_elasticsearch_domain
         - aws_elb
         - aws_emr_cluster
+        - aws_glue_dev_endpoint
         - aws_instance
         - aws_lambda_function
         - aws_launch_configuration
@@ -46,6 +47,7 @@ definition:
         - aws_sagemaker_notebook_instance
         - aws_vpc_endpoint
         - aws_mq_broker
+        - aws_memorydb_cluster
       operator:  exists
       attribute: networking
       cond_type: connection

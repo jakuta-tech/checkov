@@ -1,20 +1,20 @@
-import datetime
+from __future__ import annotations
+
 import json
 import logging
 import os
 import re
+from collections.abc import Sequence
 from copy import deepcopy
-from json import dumps, loads, JSONEncoder
+from json import dumps, loads
 from pathlib import Path
-from typing import Optional, Dict, Mapping, Set, Tuple, Callable, Any, List, Type
+from typing import Optional, Dict, Mapping, Set, Tuple, Callable, Any, List, Type, TYPE_CHECKING
 
 import deep_merge
 import hcl2
 from lark import Tree
 
-from checkov.common.parallelizer.parallel_runner import parallel_runner
-from checkov.common.runners.base_runner import filter_ignored_paths
-from checkov.common.util.config_utils import should_scan_hcl_files
+from checkov.common.runners.base_runner import filter_ignored_paths, IGNORE_HIDDEN_DIRECTORY_ENV
 from checkov.common.util.consts import DEFAULT_EXTERNAL_MODULES_DIR, RESOLVED_MODULE_ENTRY_NAME
 from checkov.common.util.json_utils import CustomJSONEncoder
 from checkov.common.variables.context import EvaluationContext
@@ -26,9 +26,19 @@ from checkov.terraform.module_loading.content import ModuleContent
 from checkov.terraform.module_loading.module_finder import load_tf_modules
 from checkov.terraform.module_loading.registry import module_loader_registry as default_ml_registry, \
     ModuleLoaderRegistry
-from checkov.terraform.parser_utils import eval_string, find_var_blocks
+from checkov.common.util.parser_utils import eval_string, find_var_blocks
+
+if TYPE_CHECKING:
+    from typing_extensions import TypeAlias
+
+
+_Hcl2Payload: TypeAlias = "dict[str, list[dict[str, Any]]]"
 
 external_modules_download_path = os.environ.get('EXTERNAL_MODULES_DIR', DEFAULT_EXTERNAL_MODULES_DIR)
+GOOD_BLOCK_TYPES = {BlockType.LOCALS, BlockType.TERRAFORM}  # used for cleaning bad tf definitions
+
+ENTITY_NAME_PATTERN = re.compile(r"[^\W0-9][\w-]*")
+RESOLVED_MODULE_PATTERN = re.compile(r"\[.+\#.+\]")
 
 
 def _filter_ignored_paths(root, paths, excluded_paths):
@@ -39,9 +49,10 @@ def _filter_ignored_paths(root, paths, excluded_paths):
 class Parser:
     def __init__(self, module_class: Type[Module] = Module):
         self.module_class = module_class
-        self._parsed_directories = set()
+        self._parsed_directories: set[str] = set()
         self.external_modules_source_map: Dict[Tuple[str, str], str] = {}
         self.module_address_map: Dict[Tuple[str, str], str] = {}
+        self.loaded_files_map = {}
 
         # This ensures that we don't try to double-load modules
         # Tuple is <file>, <module_index>, <name> (see _load_modules)
@@ -66,7 +77,7 @@ class Parser:
         self.external_modules_source_map = {}
         self.module_address_map = {}
         self.tf_var_files = tf_var_files
-        self.scan_hcl = should_scan_hcl_files()
+        self.dirname_cache = {}
 
         if self.out_evaluations_context is None:
             self.out_evaluations_context = {}
@@ -76,7 +87,7 @@ class Parser:
             self.env_vars = dict(os.environ)
         self.excluded_paths = excluded_paths
 
-    def _check_process_dir(self, directory):
+    def _check_process_dir(self, directory: str) -> bool:
         if directory not in self._parsed_directories:
             self._parsed_directories.add(directory)
             return True
@@ -102,20 +113,20 @@ class Parser:
         load_tf_modules(directory)
         self._parse_directory(dir_filter=lambda d: self._check_process_dir(d), vars_files=vars_files)
 
-    def parse_file(self, file: str, parsing_errors: Dict[str, Exception] = None, scan_hcl = False) -> Optional[Dict]:
-        if file.endswith(".tf") or file.endswith(".tf.json") or (scan_hcl and file.endswith(".hcl")):
-            parse_result = _load_or_die_quietly(Path(file), parsing_errors)
+    def parse_file(self, file: str, parsing_errors: Optional[Dict[str, Exception]] = None) -> Optional[Dict[str, Any]]:
+        if file.endswith(".tf") or file.endswith(".tf.json") or file.endswith(".hcl"):
+            parse_result = _load_or_die_quietly(file, parsing_errors)
             if parse_result:
                 parse_result = self._serialize_definitions(parse_result)
                 parse_result = self._clean_parser_types(parse_result)
                 return parse_result
-        else:
-            return None
+
+        return None
 
     def _parse_directory(self, include_sub_dirs: bool = True,
                          module_loader_registry: ModuleLoaderRegistry = default_ml_registry,
                          dir_filter: Callable[[str], bool] = lambda _: True,
-                         vars_files: Optional[List[str]] = None):
+                         vars_files: Optional[List[str]] = None) -> None:
         """
     Load and resolve configuration files starting in the given directory, merging the
     resulting data into `tf_definitions`. This loads data according to the Terraform Code Organization
@@ -143,7 +154,7 @@ class Parser:
         keys_referenced_as_modules: Set[str] = set()
 
         if include_sub_dirs:
-            for sub_dir, d_names, f_names in os.walk(self.directory):
+            for sub_dir, d_names, _ in os.walk(self.directory):
                 # filter subdirectories for future iterations (we filter files while iterating the directory)
                 _filter_ignored_paths(sub_dir, d_names, self.excluded_paths)
                 if dir_filter(os.path.abspath(sub_dir)):
@@ -164,7 +175,6 @@ class Parser:
                            dir_filter: Callable[[str], bool],
                            keys_referenced_as_modules: Set[str],
                            specified_vars: Optional[Mapping[str, str]] = None,
-                           module_load_context: Optional[str] = None,
                            vars_files: Optional[List[str]] = None,
                            root_dir: Optional[str] = None,
                            excluded_paths: Optional[List[str]] = None):
@@ -192,14 +202,14 @@ class Parser:
         explicit_var_files: List[os.DirEntry] = []  # files passed with --var-file; only process the ones that are in this directory
 
         dir_contents = list(os.scandir(directory))
-        if excluded_paths:
+        if excluded_paths or IGNORE_HIDDEN_DIRECTORY_ENV:
             filter_ignored_paths(root_dir, dir_contents, excluded_paths)
 
         tf_files_to_load = []
         for file in dir_contents:
             # Ignore directories and hidden files
             try:
-                if not file.is_file() or file.name.startswith("."):
+                if not file.is_file():
                     continue
             except OSError:
                 # Skip files that can't be accessed
@@ -217,7 +227,7 @@ class Parser:
                 explicit_var_files.append(file)
 
             # Resource files
-            elif file.name.endswith(".tf") or (self.scan_hcl and file.name.endswith('.hcl')):  # TODO: add support for .tf.json
+            elif file.name.endswith(".tf") or file.name.endswith('.hcl'):  # TODO: add support for .tf.json
                 tf_files_to_load.append(file)
 
         files_to_data = self._load_files(tf_files_to_load)
@@ -287,13 +297,6 @@ class Parser:
             var_value_and_file_map.update({k: (v, "manual specification") for k, v in specified_vars.items()})
             self.external_variables_data.extend([(k, v, "manual specification") for k, v in specified_vars.items()])
 
-        # IMPLEMENTATION NOTE: When resolving `module.` references, access to the entire data map is needed. It
-        #                      may be a little overboard, but I don't want to just pass the entire data map down
-        #                      because it break encapsulations and I don't want to cause confusion about what data
-        #                      set it being processed. To avoid this, here's a Callable that will get the data
-        #                      map for a particular module reference. (Might be OCD, but...)
-        module_data_retrieval = lambda module_ref: self.out_definitions.get(module_ref)
-
         # Stage 4: Load modules
         #          This stage needs to be done in a loop (again... alas, no DAG) because modules might not
         #          be loadable until other modules are loaded. This happens when parameters to one module
@@ -308,10 +311,8 @@ class Parser:
             logging.debug("Module load loop %d", i)
 
             # Stage 4a: Load eligible modules
-            has_more_modules = self._load_modules(directory, module_loader_registry,
-                                                  dir_filter, module_load_context,
-                                                  keys_referenced_as_modules,
-                                                  force_final_module_load)
+            has_more_modules = self._load_modules(directory, module_loader_registry, dir_filter,
+                                                  keys_referenced_as_modules, force_final_module_load)
 
             # Stage 4b: Variable resolution round 2 - now with (possibly more) modules
             made_var_changes = False
@@ -322,25 +323,35 @@ class Parser:
                 # load, forcing things through without complete resolution.
                 force_final_module_load = True
 
-    def _load_files(self, files):
-        def _load_file(file):
+    def _load_files(self, files: list[os.DirEntry]):
+        def _load_file(file: os.DirEntry):
             parsing_errors = {}
             result = _load_or_die_quietly(file, parsing_errors)
             # the exceptions type can un-pickleable
             for path, e in parsing_errors.items():
-                parsing_errors[path] = Exception(str(e))
+                parsing_errors[path] = e
 
             return (file.path, result), parsing_errors
 
-        results = parallel_runner.run_function(_load_file, files)
         files_to_data = []
+        files_to_parse = []
+        for file in files:
+            data = self.loaded_files_map.get(file.path)
+            if data:
+                files_to_data.append((file.path, data))
+            else:
+                files_to_parse.append(file)
+
+        results = [_load_file(f) for f in files_to_parse]
         for result, parsing_errors in results:
             self.out_parsing_errors.update(parsing_errors)
             files_to_data.append(result)
+            if result[0] not in self.loaded_files_map:
+                self.loaded_files_map[result[0]] = result[1]
         return files_to_data
 
     def _load_modules(self, root_dir: str, module_loader_registry: ModuleLoaderRegistry,
-                      dir_filter: Callable[[str], bool], module_load_context: Optional[str],
+                      dir_filter: Callable[[str], bool],
                       keys_referenced_as_modules: Set[str], ignore_unresolved_params: bool = False) -> bool:
         """
         Load modules which have not already been loaded and can be loaded (don't have unresolved parameters).
@@ -357,7 +368,7 @@ class Parser:
             # Don't process a file in a directory other than the directory we're processing. For example,
             # if we're down dealing with <top_dir>/<module>/something.tf, we don't want to rescan files
             # up in <top_dir>.
-            if os.path.dirname(file) != root_dir:
+            if self.get_dirname(file) != root_dir:
                 continue
             # Don't process a file reference which has already been processed
             if file.endswith("]"):
@@ -424,12 +435,11 @@ class Parser:
                         self._internal_dir_load(directory=content.path(),
                                                 module_loader_registry=module_loader_registry,
                                                 dir_filter=dir_filter, specified_vars=specified_vars,
-                                                module_load_context=module_load_context,
                                                 keys_referenced_as_modules=keys_referenced_as_modules)
 
                         module_definitions = {path: self.out_definitions[path] for path in
                                               list(self.out_definitions.keys()) if
-                                              os.path.dirname(path) == content.path()}
+                                              self.get_dirname(path) == content.path()}
 
                         if not module_definitions:
                             continue
@@ -491,12 +501,13 @@ class Parser:
         source: str,
         download_external_modules: bool = False,
         external_modules_download_path: str = DEFAULT_EXTERNAL_MODULES_DIR,
-        parsing_errors: Optional[Dict[str, Exception]] = None,
-        excluded_paths: Optional[List[str]] = None,
-        vars_files: Optional[List[str]] = None,
-        external_modules_content_cache: Optional[Dict[str, ModuleContent]] = None
-    ) -> Tuple[Module, Dict[str, Dict[str, Any]]]:
-        tf_definitions: Dict[str, Dict[str, Any]] = {}
+        parsing_errors: dict[str, Exception] | None = None,
+        excluded_paths: list[str] | None = None,
+        vars_files: list[str] | None = None,
+        external_modules_content_cache: dict[str, ModuleContent] | None = None,
+        create_graph: bool = True,
+    ) -> tuple[Module | None, dict[str, dict[str, Any]]]:
+        tf_definitions: dict[str, dict[str, Any]] = {}
         self.parse_directory(directory=source_dir, out_definitions=tf_definitions, out_evaluations_context={},
                              out_parsing_errors=parsing_errors if parsing_errors is not None else {},
                              download_external_modules=download_external_modules,
@@ -505,7 +516,10 @@ class Parser:
         tf_definitions = self._clean_parser_types(tf_definitions)
         tf_definitions = self._serialize_definitions(tf_definitions)
 
-        module, tf_definitions = self.parse_hcl_module_from_tf_definitions(tf_definitions, source_dir, source)
+        module = None
+        if create_graph:
+            module, tf_definitions = self.parse_hcl_module_from_tf_definitions(tf_definitions, source_dir, source)
+
         return module, tf_definitions
 
     def parse_hcl_module_from_tf_definitions(
@@ -529,15 +543,23 @@ class Parser:
                 try:
                     module.add_blocks(block_type, blocks[block_type], file_path, source)
                 except Exception as e:
-                    logging.error(f'Failed to add block {blocks[block_type]}. Error:')
-                    logging.error(e, exc_info=True)
+                    logging.warning(f'Failed to add block {blocks[block_type]}. Error:')
+                    logging.warning(e, exc_info=False)
         return module, tf_definitions
 
     @staticmethod
-    def _clean_parser_types(conf: dict) -> dict:
+    def _clean_parser_types(conf: dict[str, Any]) -> dict[str, Any]:
+        if not conf:
+            return conf
+
         sorted_keys = list(conf.keys())
-        if len(conf.keys()) > 0 and all(isinstance(x, type(list(conf.keys())[0])) for x in conf.keys()):
-            sorted_keys = sorted(filter(lambda x: x is not None, conf.keys()))
+        first_key_type = type(sorted_keys[0])
+        if first_key_type is None:
+            return {}
+
+        if all(isinstance(x, first_key_type) for x in sorted_keys):
+            sorted_keys.sort()
+
         # Create a new dict where the keys are sorted alphabetically
         sorted_conf = {key: conf[key] for key in sorted_keys}
         for attribute, values in sorted_conf.items():
@@ -546,7 +568,7 @@ class Parser:
             if isinstance(values, list):
                 sorted_conf[attribute] = Parser._clean_parser_types_lst(values)
             elif isinstance(values, dict):
-                sorted_conf[attribute] = Parser._clean_parser_types(conf[attribute])
+                sorted_conf[attribute] = Parser._clean_parser_types(values)
             elif isinstance(values, str) and values in ('true', 'false'):
                 sorted_conf[attribute] = True if values == 'true' else False
             elif isinstance(values, set):
@@ -556,20 +578,19 @@ class Parser:
         return sorted_conf
 
     @staticmethod
-    def _clean_parser_types_lst(values: list) -> list:
-        for i in range(len(values)):
-            val = values[i]
+    def _clean_parser_types_lst(values: list[Any]) -> list[Any]:
+        for idx, val in enumerate(values):
             if isinstance(val, dict):
-                values[i] = Parser._clean_parser_types(val)
+                values[idx] = Parser._clean_parser_types(val)
             elif isinstance(val, list):
-                values[i] = Parser._clean_parser_types_lst(val)
+                values[idx] = Parser._clean_parser_types_lst(val)
             elif isinstance(val, str):
                 if val == 'true':
-                    values[i] = True
+                    values[idx] = True
                 elif val == 'false':
-                    values[i] = False
+                    values[idx] = False
             elif isinstance(val, set):
-                values[i] = Parser._clean_parser_types_lst(list(val))
+                values[idx] = Parser._clean_parser_types_lst(list(val))
         str_values_in_lst = [val for val in values if isinstance(val, str)]
         str_values_in_lst.sort()
         result_values = [val for val in values if not isinstance(val, str)]
@@ -577,11 +598,11 @@ class Parser:
         return result_values
 
     @staticmethod
-    def _serialize_definitions(tf_definitions):
+    def _serialize_definitions(tf_definitions: dict[str, _Hcl2Payload]) -> dict[str, _Hcl2Payload]:
         return loads(dumps(tf_definitions, cls=CustomJSONEncoder))
 
     @staticmethod
-    def get_next_vertices(evaluated_files: list, unevaluated_files: list) -> (list, list):
+    def get_next_vertices(evaluated_files: list[str], unevaluated_files: list[str]) -> tuple[list[str], list[str]]:
         """
         This function implements a lazy separation of levels for the evaluated files. It receives the evaluated
         files, and returns 2 lists:
@@ -683,7 +704,7 @@ class Parser:
             dep_index_mapping=dep_index_mapping
         )
 
-    def add_tfvars(self, module, source):
+    def add_tfvars(self, module: Module, source: str) -> None:
         if not self.external_variables_data:
             return
         for (var_name, default, path) in self.external_variables_data:
@@ -691,9 +712,17 @@ class Parser:
                 block = {var_name: {"default": default}}
                 module.add_blocks(BlockType.TF_VARIABLE, block, path, source)
 
+    def get_dirname(self, path: str) -> str:
+        dirname_path = self.dirname_cache.get(path)
+        if not dirname_path:
+            dirname_path = os.path.dirname(path)
+            self.dirname_cache[path] = dirname_path
+        return dirname_path
 
-def _load_or_die_quietly(file: os.PathLike, parsing_errors: Dict,
-                         clean_definitions: bool = True) -> Optional[Mapping]:
+
+def _load_or_die_quietly(
+    file: str | Path, parsing_errors: dict[str, Exception], clean_definitions: bool = True
+) -> _Hcl2Payload | None:
     """
 Load JSON or HCL, depending on filename.
     :return: None if the file can't be loaded
@@ -705,7 +734,7 @@ Load JSON or HCL, depending on filename.
     try:
         logging.debug(f"Parsing {file_path}")
 
-        with open(file_path, "r") as f:
+        with open(file_path, "r", encoding="utf-8-sig") as f:
             if file_name.endswith(".json"):
                 return json.load(f)
             else:
@@ -716,40 +745,40 @@ Load JSON or HCL, depending on filename.
                 else:
                     return non_malformed_definitions
     except Exception as e:
-        logging.debug(f'failed while parsing file {file_path}', exc_info=e)
+        logging.debug(f'failed while parsing file {file_path}', exc_info=True)
         parsing_errors[file_path] = e
         return None
 
 
-def _is_valid_block(block):
+def _is_valid_block(block: Any) -> bool:
     if not isinstance(block, dict):
         return True
 
     # if the block is empty, there's no need to process it further
-    if len(block) == 0:
+    if not block:
         return False
 
-    entity_name, _ = next(iter(block.items()))
-    if re.fullmatch(r'[^\W0-9][\w-]*', entity_name):
+    entity_name = next(iter(block.keys()))
+    if re.fullmatch(ENTITY_NAME_PATTERN, entity_name):
         return True
     return False
 
 
-def validate_malformed_definitions(raw_data):
-    raw_data_cleaned = raw_data
-    for block_type, blocks in raw_data.items():
-        raw_data_cleaned[block_type] = [block for block in blocks if _is_valid_block(block)]
-
-    return raw_data_cleaned
-
-
-def clean_bad_definitions(tf_definition_list):
+def validate_malformed_definitions(raw_data: _Hcl2Payload) -> _Hcl2Payload:
     return {
-        block_type: list(filter(lambda definition_list: block_type == 'locals' or
-                                                        not isinstance(definition_list, dict)
-                                                        or len(definition_list.keys()) == 1,
-                                tf_definition_list[block_type]))
-        for block_type in tf_definition_list.keys()
+        block_type: [block for block in blocks if _is_valid_block(block)]
+        for block_type, blocks in raw_data.items()
+    }
+
+
+def clean_bad_definitions(tf_definition_list: _Hcl2Payload) -> _Hcl2Payload:
+    return {
+        block_type: [
+            definition
+            for definition in definition_list
+            if block_type in GOOD_BLOCK_TYPES or not isinstance(definition, dict) or len(definition) == 1
+        ]
+        for block_type, definition_list in tf_definition_list.items()
     }
 
 
@@ -760,23 +789,21 @@ def _to_native_value(value: str) -> Any:
         return eval_string(value)
 
 
-def _remove_module_dependency_in_path(path):
+def _remove_module_dependency_in_path(path: str) -> str:
     """
     :param path: path that looks like "dir/main.tf[other_dir/x.tf#0]
     :return: only the outer path: dir/main.tf
     """
-    resolved_module_pattern = r'\[.+\#.+\]'
-    if re.findall(resolved_module_pattern, path):
-        path = re.sub(resolved_module_pattern, '', path)
+    if re.findall(RESOLVED_MODULE_PATTERN, path):
+        path = re.sub(RESOLVED_MODULE_PATTERN, '', path)
     return path
 
 
-def _safe_index(sequence_hopefully, index) -> Optional[Any]:
+def _safe_index(sequence_hopefully: Sequence[Any], index: int) -> Any:
     try:
         return sequence_hopefully[index]
-    except IndexError as e:
-        logging.debug(f'Failed to parse index int ({index}) out of {sequence_hopefully}')
-        logging.debug(e, stack_info=True)
+    except IndexError:
+        logging.debug(f'Failed to parse index int ({index}) out of {sequence_hopefully}', exc_info=True)
         return None
 
 
@@ -798,7 +825,7 @@ def is_acceptable_module_param(value: Any) -> bool:
                 return False
         return True
 
-    if not value_type is str:
+    if value_type is not str:
         return True
 
     for vbm in find_var_blocks(value):

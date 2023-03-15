@@ -22,6 +22,8 @@ class CheckCategories(Enum):
     SECRETS = 8
     KUBERNETES = 9
     APPLICATION_SECURITY = 10
+    SUPPLY_CHAIN = 11
+    API_SECURITY = 12
 
 
 class OutputFormat(Enum):
@@ -39,3 +41,9 @@ class ContextCategories(Enum):
     RESOURCE = 6
     VARIABLE = 7
     OUTPUT = 8
+
+
+class ScanDataFormat(Enum):
+    TWISTCLI = 1
+    PLATFORM = 2
+    DEPENDENCY_TREE = 3

@@ -3,6 +3,10 @@ import json
 from typing import Any
 
 from lark import Tree
+from packaging.version import LegacyVersion, Version
+
+from checkov.common.bridgecrew.severities import Severity
+from checkov.common.output.common import ImageDetails
 
 
 class CustomJSONEncoder(json.JSONEncoder):
@@ -13,5 +17,13 @@ class CustomJSONEncoder(json.JSONEncoder):
             return str(o)
         elif isinstance(o, datetime.date):
             return str(o)
+        elif isinstance(o, (Version, LegacyVersion)):
+            return str(o)
+        elif isinstance(o, Severity):
+            return o.name
+        elif isinstance(o, complex):
+            return str(o)
+        elif isinstance(o, ImageDetails):
+            return o.__dict__
         else:
             return json.JSONEncoder.default(self, o)

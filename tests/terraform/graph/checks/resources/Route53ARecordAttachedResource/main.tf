@@ -27,7 +27,27 @@ resource "aws_route53_record" "pass2" {
   }
 }
 
+resource "aws_apigatewayv2_domain_name" "example" {
+  domain_name     = "api-v2.example.com"
 
+  domain_name_configuration {
+    certificate_arn = aws_acm_certificate_validation.example.certificate_arn
+    endpoint_type   = "REGIONAL"
+    security_policy = "TLS_1_2"
+  }
+}
+
+resource "aws_route53_record" "pass_apiv2" {
+  name    = aws_apigatewayv2_domain_name.example.domain_name
+  type    = "A"
+  zone_id = aws_route53_zone.example.id
+
+  alias {
+    evaluate_target_health = true
+    name                   = aws_apigatewayv2_domain_name.example.target_domain_name
+    zone_id                = aws_apigatewayv2_domain_name.example.hosted_zone_id
+  }
+}
 
 resource "aws_route53_record" "fail" {
   zone_id = data.aws_route53_zone.primary.zone_id
@@ -54,7 +74,7 @@ resource "aws_route53_record" "ignore2" {
   records = ["1.1.1.1"]
 }
 
-resource "aws_route53_record" "pass3" {
+resource "aws_route53_record" "unknown" {
   zone_id = var.zone_id
   name = "test.example.com"
   type = "A"
@@ -65,7 +85,7 @@ resource "aws_route53_record" "pass3" {
   }
 }
 
-resource "aws_route53_record" "pass4" {
+resource "aws_route53_record" "unknown2" {
   zone_id = data.aws_route53_zone.example.zone_id
   name    = "example"
   type    = "A"
@@ -73,6 +93,26 @@ resource "aws_route53_record" "pass4" {
   alias {
     name                   = data.aws_lb.example.dns_name
     zone_id                = data.aws_lb.example.zone_id
+    evaluate_target_health = true
+  }
+}
+
+resource "aws_alb" "example" {
+  name               = "example"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.lb_sg.id]
+  subnets            = [for subnet in aws_subnet.public : subnet.id]
+}
+
+resource "aws_route53_record" "pass_alb" {
+  zone_id = data.aws_route53_zone.example.zone_id
+  name    = "example"
+  type    = "A"
+
+  alias {
+    name                   = aws_alb.example.dns_name
+    zone_id                = aws_alb.example.zone_id
     evaluate_target_health = true
   }
 }
@@ -85,6 +125,21 @@ resource "aws_route53_record" "pass5" {
     evaluate_target_health = false
     name                   = aws_cloudfront_distribution.website.domain_name
     zone_id                = aws_cloudfront_distribution.website.hosted_zone_id
+  }
+}
+
+variable "aws_alb_dns_name" {}
+variable "aws_alb_zone_id" {}
+
+resource "aws_route53_record" "unknown3" {
+  zone_id = data.aws_route53_zone.example.zone_id
+  name    = "example"
+  type    = "A"
+
+  alias {
+    name                   = var.aws_alb_dns_name
+    zone_id                = var.aws_alb_zone_id
+    evaluate_target_health = true
   }
 }
 
@@ -197,3 +252,39 @@ resource "aws_route53_record" "legacy-tf" {
 }
 
 resource "aws_instance" "brochureworker" {}
+
+# ElasticBeanstalk
+
+resource "aws_route53_record" "pass_eb" {
+  zone_id = data.aws_route53_zone.dns_zone.zone_id
+  name    = var.sub_domain
+  type    = "A"
+
+  alias {
+    name                   =  aws_elastic_beanstalk_environment.pass_eb.cname
+    zone_id                =  data.aws_elastic_beanstalk_hosted_zone.current.id
+    evaluate_target_health = false
+  }
+}
+
+resource "aws_elastic_beanstalk_environment" "pass_eb" {
+  application = aws_elastic_beanstalk_application.example.name
+  name        = "example"
+}
+
+# Lightsail
+
+resource "aws_route53_record" "pass_lightsail" {
+  zone_id  = data.aws_route53_zone.dns_zone.zone_id
+  name     = var.sub_domain
+  type     = "A"
+  ttl      = "300"
+  records  = [aws_lightsail_instance.example.public_ip_address]
+}
+
+resource "aws_lightsail_instance" "example" {
+  name              = "example_lightsail_instance"
+  availability_zone = "us-east-1f"
+  blueprint_id      = "ubuntu_20_04"
+  bundle_id         = "medium_2_0"
+}

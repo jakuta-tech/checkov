@@ -4,8 +4,8 @@ from typing import Union, List, Dict
 from checkov.cloudformation.graph_builder.variable_rendering.vertex_reference import CloudformationVertexReference
 from checkov.cloudformation.parser.cfn_keywords import IntrinsicFunctions
 
-REMOVE_INTERPOLATION_PATTERN = "[${}]"
-FIND_INTERPOLATION_PATTERN = r"\${([a-zA-Z0-9.]*?)}"
+REMOVE_INTERPOLATION_PATTERN = re.compile("[${}]")
+FIND_INTERPOLATION_PATTERN = re.compile(r"\${([a-zA-Z0-9.]*?)}")
 GLOBALS_RESOURCE_TYPE_MAP = {
     "Function": "AWS::Serverless::Function",
     "Api": "AWS::Serverless::Api",
@@ -54,7 +54,8 @@ def get_referenced_vertices_in_value(
     if isinstance(value, dict):
         for key, sub_value in value.items():
             if key == IntrinsicFunctions.GET_ATT:
-                sub_value = '.'.join(sub_value) if isinstance(sub_value, list) else sub_value
+                sub_value = '.'.join(sub_value) if \
+                    isinstance(sub_value, list) and all(isinstance(s, str) for s in sub_value) else sub_value
             references_vertices += get_referenced_vertices_in_value(
                 sub_value, vertices_block_name_map
             )

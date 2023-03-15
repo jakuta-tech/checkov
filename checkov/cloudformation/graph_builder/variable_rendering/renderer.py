@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import logging
 from copy import deepcopy
 from typing import TYPE_CHECKING, Tuple, List, Any, Dict, Optional
 
@@ -33,6 +36,7 @@ class CloudformationVariableRenderer(VariableRenderer):
             IntrinsicFunctions.SELECT: self._evaluate_select_function,
             IntrinsicFunctions.JOIN: self._evaluate_join_function
         }
+        self.vertices_block_name_map = self._extract_vertices_block_name_map()
 
     """
      This method will evaluate Ref, Fn::FindInMap, Fn::GetAtt, Fn::Sub
@@ -43,10 +47,9 @@ class CloudformationVariableRenderer(VariableRenderer):
         origin_vertex = self.local_graph.vertices[edge.origin]
         origin_vertex_attributes = origin_vertex.attributes
         val_to_eval = deepcopy(origin_vertex_attributes.get(edge.label, ""))
-        vertices_block_name_map = self._extract_vertices_block_name_map()
 
         referenced_vertices = get_referenced_vertices_in_value(
-            value=val_to_eval, vertices_block_name_map=vertices_block_name_map
+            value=val_to_eval, vertices_block_name_map=self.vertices_block_name_map
         )
         if not referenced_vertices:
             # DependsOn or Condition connections
@@ -60,7 +63,8 @@ class CloudformationVariableRenderer(VariableRenderer):
 
     def _render_variables_from_vertices(self) -> None:
         for vertex in self.local_graph.vertices:
-            for attr_key, attr_value in vertex.attributes.items():
+            vertex_attributes = deepcopy(vertex.attributes)
+            for attr_key, attr_value in vertex_attributes.items():
                 # Iterating on Fn::Join, Fn::Select and checking if they are
                 # in the current attribute value
                 cfn_evaluation_function = next(
@@ -125,6 +129,9 @@ class CloudformationVariableRenderer(VariableRenderer):
             return None
         if isinstance(values_list, str):
             values_list = values_list.split(', ')
+        for value in values_list:
+            if not isinstance(value, str):
+                return None
         if isinstance(delimiter, str) and isinstance(values_list, list):
             for curr_value in values_list:
                 if isinstance(curr_value, dict):
@@ -260,26 +267,28 @@ class CloudformationVariableRenderer(VariableRenderer):
     def _evaluate_getatt_connection(value: List[str], dest_vertex_attributes: Dict[str, Any]) -> (
             Optional[str], Optional[str]):
         # value = [ "logicalNameOfResource", "attributeName" ]
-        if isinstance(value, list) and len(value) == 2:
-            resource_name = value[0]
-            attribute_name = value[1]
-            dest_name = dest_vertex_attributes.get(CustomAttributes.BLOCK_NAME).split('.')[-1]
-            attribute_at_dest = attribute_name
-            evaluated_value = dest_vertex_attributes.get(
-                attribute_at_dest)  # we extract only build time atts, not runtime
+        try:
+            if isinstance(value, list) and len(value) == 2:
+                resource_name = value[0]
+                attribute_at_dest = value[1]
+                dest_name = dest_vertex_attributes.get(CustomAttributes.BLOCK_NAME).split('.')[-1]
+                evaluated_value = dest_vertex_attributes.get(
+                    attribute_at_dest)  # we extract only build time atts, not runtime
 
-            if evaluated_value and \
-                    all(isinstance(element, str) for element in value) and \
-                    resource_name == dest_name and \
-                    dest_vertex_attributes.get(CustomAttributes.BLOCK_TYPE) == BlockType.RESOURCE:
-                return str(evaluated_value), attribute_at_dest
+                if evaluated_value and \
+                        all(isinstance(element, str) for element in value) and \
+                        resource_name == dest_name and \
+                        dest_vertex_attributes.get(CustomAttributes.BLOCK_TYPE) == BlockType.RESOURCE:
+                    return str(evaluated_value), attribute_at_dest
+        except TypeError as e:
+            logging.debug(f"unable to _evaluate_getatt_connection: {e}")
 
         return None, None
 
     def _evaluate_sub_connection(self, value: str, dest_vertex_attributes: Dict[str, Any]) -> (
             Optional[str], Optional[str]):
-        if isinstance(value, list):
-            # TODO: Render values of list type
+        if isinstance(value, (list, dict)):
+            # TODO: Render values of list/dict types
             return None, None
         evaluated_value = None
         attribute_at_dest = None
@@ -327,9 +336,15 @@ class CloudformationVariableRenderer(VariableRenderer):
         """
 
         evaluated_condition, evaluated_value, evaluated_value_hierarchy = (None, None, None)
-        condition_name = value[0]
-        operand_if_true = value[1]
-        operand_if_false = value[2]
+        try:
+            condition_name = value[0]
+            operand_if_true = value[1]
+            operand_if_false = value[2]
+        except KeyError:
+            logging.info(f'Unexpected input for cfn if evaluation: {value}. '
+                         f'Template: {condition_vertex_attributes[CustomAttributes.FILE_PATH]}'
+                         f'Block: {condition_vertex_attributes[CustomAttributes.BLOCK_NAME]}')
+            return evaluated_value, evaluated_value_hierarchy
 
         # First, we evaluate the ConditionName
         if isinstance(condition_name, str) and\
@@ -411,9 +426,11 @@ class CloudformationVariableRenderer(VariableRenderer):
             evaluated_edges = list()
             for edge in edge_list:
                 dest_vertex_attributes = self.local_graph.get_vertex_attributes_by_index(edge.dest)
-
-                (evaluated_value, changed_origin_id, attribute_at_dest) = self._evaluate_cfn_function(
-                    edge, origin_vertex, cfn_evaluation_function, val_to_eval, dest_vertex_attributes)
+                try:
+                    (evaluated_value, changed_origin_id, attribute_at_dest) = self._evaluate_cfn_function(
+                        edge, origin_vertex, cfn_evaluation_function, val_to_eval, dest_vertex_attributes)
+                except KeyError:
+                    logging.info(f'Failed to evalue cfn function. val_to_eval: {val_to_eval}')
 
                 if evaluated_value and evaluated_value != original_value:
                     # succeeded to evaluate an edge
@@ -440,7 +457,14 @@ class CloudformationVariableRenderer(VariableRenderer):
                         attribute_at_dest=evaluated_value['attribute_at_dest']
                     )
 
-    def _evaluate_cfn_function(self, edge, origin_vertex, cfn_evaluation_function, val_to_eval, dest_vertex_attributes):
+    def _evaluate_cfn_function(
+        self,
+        edge: Edge,
+        origin_vertex: Block,
+        cfn_evaluation_function: str,
+        val_to_eval: dict[str, Any],
+        dest_vertex_attributes: dict[str, Any],
+    ) -> tuple[str | None, int | None, str | None]:
         (evaluated_value, changed_origin_id, attribute_at_dest) = (None, None, None)
 
         if cfn_evaluation_function == ConditionFunctions.IF:
@@ -461,3 +485,7 @@ class CloudformationVariableRenderer(VariableRenderer):
             changed_origin_id = edge.dest
 
         return evaluated_value, changed_origin_id, attribute_at_dest
+
+    def evaluate_non_rendered_values(self) -> None:
+        # not used
+        pass

@@ -1,80 +1,54 @@
-import logging
-import os
+from __future__ import annotations
 
-from checkov.common.output.record import Record
-from checkov.common.output.report import Report
-from checkov.common.parallelizer.parallel_runner import parallel_runner
-from checkov.common.runners.base_runner import BaseRunner, filter_ignored_paths
+from typing import Any, TYPE_CHECKING
+
+from checkov.common.bridgecrew.check_type import CheckType
 from checkov.common.parsers.json import parse
-from checkov.json_doc.registry import registry
-from checkov.runner_filter import RunnerFilter
+from checkov.common.parsers.node import DictNode
+from checkov.common.runners.object_runner import Runner as ObjectRunner
+
+if TYPE_CHECKING:
+    from checkov.common.checks.base_check_registry import BaseCheckRegistry
+    from checkov.common.graph.db_connectors.networkx.networkx_db_connector import NetworkxConnector
+    from checkov.common.runners.graph_builder.local_graph import ObjectLocalGraph
+    from checkov.common.runners.graph_manager import ObjectGraphManager
 
 
-class Runner(BaseRunner):
-    check_type = "json"
+class Runner(ObjectRunner):
+    check_type = CheckType.JSON  # noqa: CCE003  # a static attribute
 
-    @staticmethod
-    def _load_files(files_to_load, definitions, definitions_raw, filename_fn=None):
-        files_to_load = [filename_fn(file) if filename_fn else file for file in files_to_load]
-        results = parallel_runner.run_function(lambda f: (f, parse(f)), files_to_load)
-        for file, result in results:
-            (definitions[file], definitions_raw[file]) = result
+    def __init__(
+        self,
+        db_connector: NetworkxConnector | None = None,
+        source: str = "json",
+        graph_class: type[ObjectLocalGraph] | None = None,
+        graph_manager: ObjectGraphManager | None = None,
+    ) -> None:
+        super().__init__(
+            db_connector=db_connector,
+            source=source,
+            graph_class=graph_class,
+            graph_manager=graph_manager,
+        )
+        self.file_extensions = ['.json']
 
-    def run(self, root_folder=None, external_checks_dir=None, files=None,
-            runner_filter=RunnerFilter(), collect_skip_comments=True):
+    def import_registry(self) -> BaseCheckRegistry:
+        from checkov.json_doc.registry import registry
+        return registry
 
-        definitions = {}
-        definitions_raw = {}
+    def _parse_file(
+        self, f: str, file_content: str | None = None
+    ) -> tuple[dict[str, Any] | list[dict[str, Any]], list[tuple[int, str]]] | None:
+        if not f.endswith(".json"):
+            return None
 
-        report = Report(self.check_type)
+        return parse(filename=f, file_content=file_content)
 
-        if not files and not root_folder:
-            logging.debug("No resources to scan.")
-            return report
+    def get_start_end_lines(self, end: int, result_config: dict[str, Any], start: int) -> tuple[int, int]:
+        if not isinstance(result_config, DictNode):
+            # shouldn't happen
+            return 0, 0
 
-        if not external_checks_dir:
-            logging.debug("The json runner requires that external checks are defined.")
-            return report
-
-        for directory in external_checks_dir:
-            registry.load_external_checks(directory)
-
-        if files:
-            self._load_files(files, definitions, definitions_raw)
-
-        if root_folder:
-            for root, d_names, f_names in os.walk(root_folder):
-                filter_ignored_paths(root, d_names, runner_filter.excluded_paths)
-                filter_ignored_paths(root, f_names, runner_filter.excluded_paths)
-                self._load_files(
-                    f_names,
-                    definitions,
-                    definitions_raw,
-                    lambda f: os.path.join(root, f)
-                )
-
-        for json_file_path in definitions.keys():
-            results = registry.scan(
-                json_file_path, definitions[json_file_path], [], runner_filter
-            )
-            for check, result in results.items():
-                result_config = result["results_configuration"]
-                start = result_config.start_mark.line
-                end = result_config.end_mark.line
-                record = Record(
-                    check_id=check.id,
-                    bc_check_id=check.bc_id,
-                    check_name=check.name,
-                    check_result=result,
-                    code_block=definitions_raw[json_file_path][start:end + 1],
-                    file_path=json_file_path,
-                    file_line_range=[start + 1, end + 1],
-                    resource=f"{json_file_path}",
-                    evaluations=None,
-                    check_class=check.__class__.__module__,
-                    file_abs_path=os.path.abspath(json_file_path),
-                    entity_tags=None
-                )
-                report.add_record(record)
-
-        return report
+        start = result_config.start_mark.line
+        end = result_config.end_mark.line
+        return end, start

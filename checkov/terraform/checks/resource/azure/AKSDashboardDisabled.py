@@ -12,12 +12,16 @@ class AKSDashboardDisabled(BaseResourceCheck):
         super().__init__(name=name, id=id, categories=categories, supported_resources=supported_resources)
 
     def scan_resource_conf(self, conf):
-        addon_profile = conf.get('addon_profile', [None])[0]
+        addon_profile = conf.get('addon_profile')
+        if addon_profile:
+            addon_profile = addon_profile[0]
         self.evaluated_keys = ['addon_profile']
         if addon_profile and isinstance(addon_profile, dict):
-            if addon_profile.get('kube_dashboard') and addon_profile['kube_dashboard'][0].get('enabled', [False])[0]:
-                self.evaluated_keys = ['addon_profile/kube_dashboard', 'addon_profile/kube_dashboard/[0]/enabled']
-                return CheckResult.FAILED
+            dashboard = addon_profile.get('kube_dashboard', [[]])[0]
+            if isinstance(dashboard, dict):
+                if dashboard.get('enabled')[0]:
+                    self.evaluated_keys = ['addon_profile/kube_dashboard', 'addon_profile/kube_dashboard/[0]/enabled']
+                    return CheckResult.FAILED
         return CheckResult.PASSED
 
 

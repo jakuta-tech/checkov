@@ -1,305 +1,303 @@
-import logging
-import operator
-import os
-from functools import reduce
+from __future__ import annotations
 
-from checkov.common.bridgecrew.platform_integration import bc_integration
+import logging
+import os
+from typing import Type, Any, TYPE_CHECKING
+
 from checkov.common.checks_infra.registry import get_graph_checks_registry
+from checkov.common.graph.checks_infra.registry import BaseRegistry
 from checkov.common.graph.db_connectors.networkx.networkx_db_connector import NetworkxConnector
 from checkov.common.graph.graph_builder import CustomAttributes
-from checkov.common.util.data_structures_utils import search_deep_keys
-from checkov.common.util.type_forcers import force_list
+from checkov.common.images.image_referencer import ImageReferencerMixin
+from checkov.common.output.extra_resource import ExtraResource
 from checkov.common.output.record import Record
-from checkov.common.output.report import Report
-from checkov.common.runners.base_runner import BaseRunner
+from checkov.common.output.report import Report, merge_reports
+from checkov.common.bridgecrew.check_type import CheckType
+from checkov.common.runners.base_runner import BaseRunner, CHECKOV_CREATE_GRAPH
+from checkov.common.typing import _CheckResult
+from checkov.kubernetes.checks.resource.registry import registry
 from checkov.kubernetes.graph_builder.local_graph import KubernetesLocalGraph
 from checkov.kubernetes.graph_manager import KubernetesGraphManager
-from checkov.kubernetes.kubernetes_utils import get_files_definitions, get_folder_definitions
-from checkov.kubernetes.checks.resource.registry import registry
+from checkov.kubernetes.image_referencer.manager import KubernetesImageReferencerManager
+from checkov.kubernetes.kubernetes_utils import (
+    create_definitions,
+    build_definitions_context,
+    get_skipped_checks,
+    get_resource_id,
+    K8_POSSIBLE_ENDINGS,
+)
 from checkov.runner_filter import RunnerFilter
 
+if TYPE_CHECKING:
+    from networkx import DiGraph
+    from types import FrameType
+    from checkov.common.checks.base_check import BaseCheck
+    from checkov.common.graph.checks_infra.base_check import BaseGraphCheck
+    from checkov.common.images.image_referencer import Image
 
-class Runner(BaseRunner):
+
+class TimeoutError(Exception):
+    pass
+
+
+def handle_timeout(signum: int, frame: FrameType | None) -> Any:
+    raise TimeoutError('command got timeout')
+
+
+class Runner(ImageReferencerMixin[None], BaseRunner[KubernetesGraphManager]):
+    check_type = CheckType.KUBERNETES  # noqa: CCE003  # a static attribute
+
     def __init__(
         self,
-        graph_class=KubernetesLocalGraph,
-        db_connector=NetworkxConnector(),
-        source="Kubernetes",
-        graph_manager=None,
-    ):
-        self.check_type = "kubernetes"
+        graph_class: Type[KubernetesLocalGraph] = KubernetesLocalGraph,
+        db_connector: NetworkxConnector | None = None,
+        source: str = "Kubernetes",
+        graph_manager: KubernetesGraphManager | None = None,
+        external_registries: list[BaseRegistry] | None = None,
+        report_type: str = check_type
+    ) -> None:
+        db_connector = db_connector or NetworkxConnector()
+
+        super().__init__(file_extensions=K8_POSSIBLE_ENDINGS)
+        self.external_registries = [] if external_registries is None else external_registries
         self.graph_class = graph_class
-        # TODO: uncomment it in order to create the graph
-        # self.graph_manager = \
-        #     graph_manager if graph_manager else KubernetesGraphManager(source=source, db_connector=db_connector)
+        self.graph_manager = \
+            graph_manager if graph_manager else KubernetesGraphManager(source=source, db_connector=db_connector)
 
         self.graph_registry = get_graph_checks_registry(self.check_type)
-        self.definitions_raw = {}
+        self.definitions: "dict[str, list[dict[str, Any]]]" = {}  # type:ignore[assignment]
+        self.definitions_raw: "dict[str, list[tuple[int, str]]]" = {}
+        self.report_mutator_data: "dict[str, dict[str, Any]]" = {}
+        self.report_type = report_type
 
-    def run(self, root_folder, external_checks_dir=None, files=None, runner_filter=RunnerFilter(), collect_skip_comments=True, helmChart=None):
+    def run(
+        self,
+        root_folder: str | None,
+        external_checks_dir: list[str] | None = None,
+        files: list[str] | None = None,
+        runner_filter: RunnerFilter | None = None,
+        collect_skip_comments: bool = True,
+    ) -> Report | list[Report]:
+        runner_filter = runner_filter or RunnerFilter()
+        if not runner_filter.show_progress_bar:
+            self.pbar.turn_off_progress_bar()
+
         report = Report(self.check_type)
-        if external_checks_dir:
-            for directory in external_checks_dir:
-                registry.load_external_checks(directory)
-                self.graph_registry.load_external_checks(directory)
+        if self.context is None or self.definitions is None:
+            if files or root_folder:
+                self.definitions, self.definitions_raw = create_definitions(root_folder, files, runner_filter)
+            else:
+                return report
+            if external_checks_dir:
+                for directory in external_checks_dir:
+                    registry.load_external_checks(directory)
 
-        if files:
-            definitions, self.definitions_raw = get_files_definitions(files)
-        elif root_folder:
-            definitions, self.definitions_raw = get_folder_definitions(root_folder, runner_filter.excluded_paths)
-        else:
-            return report
+                    if CHECKOV_CREATE_GRAPH and self.graph_registry:
+                        self.graph_registry.load_external_checks(directory)
 
-        # TODO: uncomment it in order to build the graph
-        # logging.info("creating kubernetes graph")
-        # local_graph = self.graph_manager.build_graph_from_definitions(definitions)
-        # for vertex in local_graph.vertices:
-        #     report.add_resource(f'{vertex.path}:{vertex.id}')
-        # self.graph_manager.save_graph(local_graph)
+            self.context = build_definitions_context(self.definitions, self.definitions_raw)
 
-        for k8_file in definitions.keys():
+            if CHECKOV_CREATE_GRAPH and self.graph_manager:
+                logging.info("creating Kubernetes graph")
+                local_graph = self.graph_manager.build_graph_from_definitions(self.definitions)
+                logging.info("Successfully created Kubernetes graph")
 
+                for vertex in local_graph.vertices:
+                    file_abs_path = _get_entity_abs_path(root_folder, vertex.path)
+                    report.add_resource(f'{file_abs_path}:{vertex.id}')
+                self.graph_manager.save_graph(local_graph)
+                self.definitions = local_graph.definitions
+        self.pbar.initiate(len(self.definitions))
+        report = self.check_definitions(root_folder, runner_filter, report, collect_skip_comments=collect_skip_comments)
+
+        if CHECKOV_CREATE_GRAPH and self.graph_manager:
+            graph_report = self.get_graph_checks_report(root_folder, runner_filter)
+            merge_reports(report, graph_report)
+
+            if runner_filter.run_image_referencer:
+                if files:
+                    # 'root_folder' shouldn't be empty to remove the whole path later and only leave the shortened form
+                    root_folder = os.path.split(os.path.commonprefix(files))[0]
+
+                image_report = self.check_container_image_references(
+                    graph_connector=self.graph_manager.get_reader_endpoint(),
+                    root_path=root_folder,
+                    runner_filter=runner_filter,
+                )
+
+                if image_report:
+                    # due too many tests failing only return a list, if there is an image report
+                    return [report, image_report]
+
+        return report
+
+    def check_definitions(
+        self, root_folder: str | None, runner_filter: RunnerFilter, report: Report, collect_skip_comments: bool = True
+    ) -> Report:
+        for k8_file in self.definitions.keys():
+            self.pbar.set_additional_data({'Current File Scanned': os.path.relpath(k8_file, root_folder)})
             # There are a few cases here. If -f was used, there could be a leading / because it's an absolute path,
             # or there will be no leading slash; root_folder will always be none.
             # If -d is used, root_folder will be the value given, and -f will start with a / (hardcoded above).
             # The goal here is simply to get a valid path to the file (which sls_file does not always give).
-            if k8_file[0] == '/':
-                path_to_convert = (root_folder + k8_file) if root_folder else k8_file
-            else:
-                path_to_convert = (os.path.join(root_folder, k8_file)) if root_folder else k8_file
+            file_abs_path = _get_entity_abs_path(root_folder, k8_file)
+            k8_file_path = f"/{os.path.relpath(file_abs_path, root_folder)}"
+            # Run for each definition
+            for entity_conf in self.definitions[k8_file]:
+                entity_type = entity_conf.get("kind")
 
-            file_abs_path = os.path.abspath(path_to_convert)
+                # Skip Kustomization Templates.
+                # Should be handled by Kusomize framework handler when it finds kustomization.yaml files.
+                # TODO: FUTURE: Potentially call the framework if we find items here that aren't in a file called kustomization.yaml - validate this edge case.
+                if entity_type == "Kustomization":
+                    continue
 
-            if definitions[k8_file]:
-                for i in range(len(definitions[k8_file])):
-                    if (not 'apiVersion' in definitions[k8_file][i].keys()) and (not 'kind' in definitions[k8_file][i].keys()):
-                        continue
-                    logging.debug("Template Dump for {}: {}".format(k8_file, definitions[k8_file][i], indent=2))
+                skipped_checks = get_skipped_checks(entity_conf)
+                results = registry.scan(k8_file, entity_conf, skipped_checks, runner_filter)
 
-                    entity_conf = definitions[k8_file][i]
-                    if entity_conf is None:
-                        continue
+                # TODO? - Variable Eval Message!
+                variable_evaluations: "dict[str, Any]" = {}
 
-                    # Split out resources if entity kind is List
-                    if isinstance(entity_conf, dict) and entity_conf["kind"] == "List":
-                        for item in entity_conf.get("items", []):
-                            definitions[k8_file].append(item)
+                report = self.mutate_kubernetes_results(results, report, k8_file, k8_file_path, file_abs_path, entity_conf, variable_evaluations)
+            self.pbar.update()
+        self.pbar.close()
+        return report
 
-                for i in range(len(definitions[k8_file])):
-                    if _is_invalid_k8_definition(definitions[k8_file][i]):
-                        continue
-                    logging.debug("Template Dump for {}: {}".format(k8_file, definitions[k8_file][i], indent=2))
+    def get_graph_checks_report(self, root_folder: str | None, runner_filter: RunnerFilter) -> Report:
+        report = Report(self.check_type)
+        checks_results = self.run_graph_checks_results(runner_filter, self.report_type)
+        report = self.mutate_kubernetes_graph_results(root_folder, runner_filter, report, checks_results)
+        return report
 
-                    entity_conf = definitions[k8_file][i]
+    def mutate_kubernetes_results(
+        self,
+        results: dict[BaseCheck, _CheckResult],
+        report: Report,
+        k8_file: str,
+        k8_file_path: str,
+        file_abs_path: str,
+        entity_conf: dict[str, Any],
+        variable_evaluations: dict[str, Any],
+    ) -> Report:
+        # Moves report generation logic out of run() method in Runner class.
+        # Allows function overriding of a much smaller function than run() for other "child" frameworks such as Kustomize, Helm
+        # Where Kubernetes CHECKS are needed, but the specific file references are to another framework for the user output (or a mix of both).
+        if not self.context:
+            # this shouldn't happen
+            logging.error("Context for Kubernetes runner was not set")
+            return report
 
-                    if isinstance(entity_conf, dict) and entity_conf.get("kind") == "List":
-                        continue
+        if results:
+            for check, check_result in results.items():
+                resource_id = get_resource_id(entity_conf)
+                if not resource_id:
+                    continue
 
-                    # Skip entity without metadata["name"]
-                    if isinstance(entity_conf, dict) and entity_conf.get("metadata"):
-                        if isinstance(entity_conf["metadata"], int) or "name" not in entity_conf["metadata"]:
-                            continue
-                    else:
-                        continue
+                entity_context = self.context[k8_file][resource_id]
 
-                    # Skip entity with parent (metadata["ownerReferences"]) in runtime
-                    # We will alert in runtime only
-                    if "ownerReferences" in entity_conf["metadata"] and \
-                            entity_conf["metadata"]["ownerReferences"] is not None:
-                        continue
+                record = Record(
+                    check_id=check.id,
+                    bc_check_id=check.bc_id,
+                    check_name=check.name,
+                    check_result=check_result,
+                    code_block=entity_context.get("code_lines"),
+                    file_path=k8_file_path,
+                    file_line_range=[entity_context.get("start_line"), entity_context.get("end_line")],
+                    resource=resource_id,
+                    evaluations=variable_evaluations,
+                    check_class=check.__class__.__module__,
+                    file_abs_path=file_abs_path,
+                    severity=check.severity,
+                )
+                record.set_guideline(check.guideline)
+                report.add_record(record=record)
+        else:
+            resource_id = get_resource_id(entity_conf)
+            if not resource_id:
+                return report
 
-                    # Append containers and initContainers to definitions list
-                    for type in ["containers", "initContainers"]:
-                        containers = []
-                        if entity_conf["kind"] == "CustomResourceDefinition":
-                            continue
-                        containers = search_deep_keys(type, entity_conf, [])
-                        if not containers:
-                            continue
-                        containers = containers.pop()
-                        #containers.insert(0,entity_conf['kind'])
-                        containerDef = {}
-                        if "namespace" in entity_conf["metadata"]:
-                            namespace = entity_conf["metadata"]["namespace"]
-                        else:
-                            namespace = "default"
-                        containerDef["containers"] = containers.pop()
-                        if containerDef["containers"] is not None:
-                            containerDef["containers"] = force_list(containerDef["containers"])
-                            for cd in containerDef["containers"]:
-                                i = containerDef["containers"].index(cd)
-                                containerDef["containers"][i]["apiVersion"] = entity_conf["apiVersion"]
-                                containerDef["containers"][i]["kind"] = type
-                                containerDef["containers"][i]["parent"] = "{}.{}.{} (container {})".format(
-                                    entity_conf["kind"], entity_conf["metadata"]["name"], namespace, str(i))
-                                containerDef["containers"][i]["parent_metadata"] = entity_conf["metadata"]
-                            definitions[k8_file].extend(containerDef["containers"])
-
-                # Run for each definition included added container definitions
-                for i in range(len(definitions[k8_file])):
-                    if _is_invalid_k8_definition(definitions[k8_file][i]):
-                        continue
-                    logging.debug("Template Dump for {}: {}".format(k8_file, definitions[k8_file][i], indent=2))
-
-                    entity_conf = definitions[k8_file][i]
-                    if entity_conf is None:
-                        continue
-                    if isinstance(entity_conf, dict) and (entity_conf["kind"] == "List" or not entity_conf.get("kind")):
-                        continue
-
-                    if isinstance(entity_conf, dict) and isinstance(entity_conf.get("kind"), int):
-                        continue
-                    # Skip entity without metadata["name"] or parent_metadata["name"]
-                    if not any(x in entity_conf["kind"] for x in ["containers", "initContainers"]):
-                        if entity_conf.get("metadata"):
-                            if isinstance(entity_conf["metadata"], int) or not "name" in entity_conf["metadata"]:
-                                continue
-                        else:
-                            continue
-
-                    # Skip entity with parent (metadata["ownerReferences"]) in runtime
-                    # We will alert in runtime only
-                    if "metadata" in entity_conf:
-                        if "ownerReferences" in entity_conf["metadata"] and \
-                                entity_conf["metadata"]["ownerReferences"] is not None:
-                            continue
-
-                    # Skip Kustomization Templates (for now)
-                    if entity_conf["kind"] == "Kustomization":
-                        continue
-
-                    skipped_checks = get_skipped_checks(entity_conf)
-
-                    results = registry.scan(k8_file, entity_conf, skipped_checks, runner_filter)
-
-                    start_line = entity_conf["__startline__"]
-                    end_line = entity_conf["__endline__"]
-
-                    if start_line == end_line:
-                        entity_lines_range = [start_line, end_line]
-                        entity_code_lines = self.definitions_raw[k8_file][start_line - 1: end_line]
-                    else:
-                        entity_lines_range = [start_line, end_line - 1]
-                        entity_code_lines = self.definitions_raw[k8_file][start_line - 1: end_line - 1]
-
-                    # TODO? - Variable Eval Message!
-                    variable_evaluations = {}
-
-                    for check, check_result in results.items():
-                        resource_id = check.get_resource_id(entity_conf)
-                        report.add_resource(f'{k8_file}:{resource_id}')
-                        record = Record(check_id=check.id, bc_check_id=check.bc_id,
-                                        check_name=check.name, check_result=check_result,
-                                        code_block=entity_code_lines, file_path=k8_file,
-                                        file_line_range=entity_lines_range,
-                                        resource=resource_id, evaluations=variable_evaluations,
-                                        check_class=check.__class__.__module__, file_abs_path=file_abs_path)
-                        record.set_guideline(check.guideline)
-                        report.add_record(record=record)
+            # resources without checks, but not existing ones
+            report.extra_resources.add(
+                ExtraResource(
+                    file_abs_path=file_abs_path,
+                    file_path=k8_file_path,
+                    resource=resource_id,
+                )
+            )
 
         return report
 
-    def get_graph_checks_report(self, root_folder: str, runner_filter: RunnerFilter) -> Report:
-        report = Report(self.check_type)
-        checks_results = self.run_graph_checks_results(runner_filter)
+    def mutate_kubernetes_graph_results(
+        self,
+        root_folder: str | None,
+        runner_filter: RunnerFilter,
+        report: Report,
+        checks_results: dict[BaseGraphCheck, list[_CheckResult]],
+    ) -> Report:
+        # Moves report generation logic out of run() method in Runner class.
+        # Allows function overriding of a much smaller function than run() for other "child" frameworks such as Kustomize, Helm
+        # Where Kubernetes CHECKS are needed, but the specific file references are to another framework for the user output (or a mix of both).
+        if not checks_results:
+            return report
+
+        if not self.context:
+            # this shouldn't happen
+            logging.error("Context for Kubernetes runner was not set")
+            return report
 
         for check, check_results in checks_results.items():
             for check_result in check_results:
                 entity = check_result["entity"]
-                entity_file_abs_path = entity.get(CustomAttributes.FILE_PATH)
-                entity_file_path = f"/{os.path.relpath(entity_file_abs_path, root_folder)}"
-                start_line = entity['__startline__']
-                end_line = entity['__endline__']
+                entity_file_path = entity[CustomAttributes.FILE_PATH]
+                entity_file_abs_path = _get_entity_abs_path(root_folder, entity_file_path)
+                entity_id = entity[CustomAttributes.ID]
+                entity_context = self.context[entity_file_path][entity_id]
 
-                if start_line == end_line:
-                    entity_lines_range = [start_line, end_line]
-                    entity_code_lines = self.definitions_raw[entity_file_path][start_line - 1: end_line]
-                else:
-                    entity_lines_range = [start_line, end_line - 1]
-                    entity_code_lines = self.definitions_raw[entity_file_path][start_line - 1: end_line - 1]
+                clean_check_result: _CheckResult = {
+                    "result": check_result["result"],
+                    "evaluated_keys": check_result["evaluated_keys"],
+                }
 
                 record = Record(
                     check_id=check.id,
                     check_name=check.name,
-                    check_result=check_result,
-                    code_block=entity_code_lines,
-                    file_path=entity_file_path,
-                    file_line_range=entity_lines_range,
-                    resource=entity.get(CustomAttributes.ID),
+                    check_result=clean_check_result,
+                    code_block=entity_context.get("code_lines"),
+                    file_path=get_relative_file_path(entity_file_abs_path, root_folder),
+                    file_line_range=[entity_context.get("start_line"), entity_context.get("end_line")],
+                    resource=entity[CustomAttributes.ID],
                     evaluations={},
                     check_class=check.__class__.__module__,
-                    file_abs_path=entity_file_abs_path
+                    file_abs_path=entity_file_abs_path,
+                    severity=check.severity
                 )
                 record.set_guideline(check.guideline)
                 report.add_record(record=record)
         return report
 
+    def extract_images(
+        self,
+        graph_connector: DiGraph | None = None,
+        definitions: None = None,
+        definitions_raw: dict[str, list[tuple[int, str]]] | None = None
+    ) -> list[Image]:
+        if not graph_connector:
+            # should not happen
+            return []
 
-def get_skipped_checks(entity_conf):
-    skipped = []
-    metadata = {}
-    bc_id_mapping = bc_integration.get_id_mapping()
-    ckv_to_bc_id_mapping = bc_integration.get_ckv_to_bc_id_mapping()
-    if not isinstance(entity_conf,dict):
-        return skipped
-    if entity_conf["kind"] == "containers" or entity_conf["kind"] == "initContainers":
-        metadata = entity_conf["parent_metadata"]
+        manager = KubernetesImageReferencerManager(graph_connector=graph_connector)
+        images = manager.extract_images_from_resources()
+
+        return images
+
+
+def get_relative_file_path(file_abs_path: str, root_folder: str | None) -> str:
+    return f"/{os.path.relpath(file_abs_path, root_folder)}"
+
+
+def _get_entity_abs_path(root_folder: str | None, entity_file_path: str) -> str:
+    if entity_file_path[0] == '/' and (root_folder and not entity_file_path.startswith(root_folder)):
+        path_to_convert = (root_folder + entity_file_path) if root_folder else entity_file_path
     else:
-        if "metadata" in entity_conf.keys():
-            metadata = entity_conf["metadata"]
-    if "annotations" in metadata.keys() and metadata["annotations"] is not None:
-        if isinstance(metadata["annotations"], dict):
-            metadata["annotations"] = force_list(metadata["annotations"])
-        for annotation in metadata["annotations"]:
-            if not isinstance(annotation, dict):
-                logging.debug( f"Parse of Annotation Failed for {annotation}: {entity_conf}")
-                continue
-            for key in annotation:
-                skipped_item = {}
-                if "checkov.io/skip" in key or "bridgecrew.io/skip" in key:
-                    if "CKV_K8S" in annotation[key] or "BC_K8S" in annotation[key]:
-                        if "=" in annotation[key]:
-                            (skipped_item["id"], skipped_item["suppress_comment"]) = annotation[key].split("=")
-                        else:
-                            skipped_item["id"] = annotation[key]
-                            skipped_item["suppress_comment"] = "No comment provided"
-
-                        # No matter which ID was used to skip, save the pair of IDs in the appropriate fields
-                        if bc_id_mapping and skipped_item["id"] in bc_id_mapping:
-                            skipped_item["bc_id"] = skipped_item["id"]
-                            skipped_item["id"] = bc_id_mapping[skipped_item["id"]]
-                        elif ckv_to_bc_id_mapping:
-                            skipped_item["bc_id"] = ckv_to_bc_id_mapping.get(skipped_item["id"])
-                        skipped.append(skipped_item)
-                    else:
-                        logging.debug("Parse of Annotation Failed for {}: {}".format(metadata["annotations"][key], entity_conf, indent=2))
-                        continue
-    return skipped
-
-
-def _get_from_dict(data_dict, map_list):
-    return reduce(operator.getitem, map_list, data_dict)
-
-
-def _set_in_dict(data_dict, map_list, value):
-    _get_from_dict(data_dict, map_list[:-1])[map_list[-1]] = value
-
-
-def find_lines(node, kv):
-    if isinstance(node, str):
-        return node
-    if isinstance(node, list):
-        for i in node:
-            for x in find_lines(i, kv):
-                yield x
-    elif isinstance(node, dict):
-        if kv in node:
-            yield node[kv]
-        for j in node.values():
-            for x in find_lines(j, kv):
-                yield x
-
-
-def _is_invalid_k8_definition(definition: dict) -> bool:
-    return isinstance(definition, dict) and 'apiVersion' not in definition.keys() and 'kind' not in \
-           definition.keys()
+        path_to_convert = (os.path.join(root_folder, entity_file_path)) if root_folder else entity_file_path
+    return os.path.abspath(path_to_convert)

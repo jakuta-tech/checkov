@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 from typing import List, Dict, Any, Optional
 
@@ -6,16 +8,19 @@ from checkov.common.graph.graph_builder.variable_rendering.breadcrumb_metadata i
 
 
 class CloudformationBlock(Block):
+    __slots__ = ("condition", "metadata")
+
     def __init__(
-            self,
-            name: str,
-            config: Dict[str, Any],
-            path: str,
-            block_type: str,
-            attributes: Dict[str, Any],
-            id: str = "",
-            source: str = "",
-            condition: bool = True,
+        self,
+        name: str,
+        config: Dict[str, Any],
+        path: str,
+        block_type: str,
+        attributes: Dict[str, Any],
+        id: str = "",
+        source: str = "",
+        condition: bool = True,
+        metadata: Optional[Dict[str, Any]] = None
     ) -> None:
         """
             :param name: unique name given to the terraform block, for example: 'aws_vpc.example_name'
@@ -26,13 +31,24 @@ class CloudformationBlock(Block):
         """
         super().__init__(name, config, path, block_type, attributes, id, source)
         self.condition = condition
+        self.metadata = metadata
 
     def update_attribute(
-            self, attribute_key: str, attribute_value: Any, change_origin_id: int,
-            previous_breadcrumbs: List[BreadcrumbMetadata], attribute_at_dest: str
+        self, attribute_key: str,
+        attribute_value: Any,
+        change_origin_id: int,
+        previous_breadcrumbs: List[BreadcrumbMetadata],
+        attribute_at_dest: str,
+        transform_step: bool = False,
     ) -> None:
-        super().update_attribute(attribute_key, attribute_value, change_origin_id, previous_breadcrumbs,
-                                 attribute_at_dest)
+        super().update_attribute(
+            attribute_key=attribute_key,
+            attribute_value=attribute_value,
+            change_origin_id=change_origin_id,
+            previous_breadcrumbs=previous_breadcrumbs,
+            attribute_at_dest=attribute_at_dest,
+            transform_step=transform_step,
+        )
 
         attribute_key_parts = attribute_key.split(".")
         if attribute_key_parts:
@@ -57,12 +73,21 @@ class CloudformationBlock(Block):
             else:
                 logging.info(f"Failed to update an attribute, values: {obj_to_update}, {key_to_update}, {attribute_value}")
 
+    def update_inner_attribute(
+        self, attribute_key: str, nested_attributes: list[Any] | dict[str, Any], value_to_update: Any
+    ) -> None:
+        # this overrides the parent method, which doesn't work as expected with CloudFormation
+        pass
+
     @staticmethod
     def _should_add_previous_breadcrumbs(change_origin_id: Optional[int],
                                          previous_breadcrumbs: List[BreadcrumbMetadata],
                                          attribute_at_dest: Optional[str]):
-        return change_origin_id is not None and attribute_at_dest is not None and \
-               (not previous_breadcrumbs or previous_breadcrumbs[-1].vertex_id != change_origin_id)
+        return (
+            change_origin_id is not None
+            and attribute_at_dest is not None
+            and (not previous_breadcrumbs or previous_breadcrumbs[-1].vertex_id != change_origin_id)
+        )
 
     @staticmethod
     def _should_set_changed_attributes(change_origin_id: Optional[int], attribute_at_dest: Optional[str]):

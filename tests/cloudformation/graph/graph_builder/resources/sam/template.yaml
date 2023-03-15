@@ -1,6 +1,18 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 
+Mappings:
+  ServiceDiscovery:
+    self:
+      "name": 'amecard-cancel-api'
+
+Parameters:
+  EnvironmentType:
+    Type: String
+    AllowedValues:
+      - dev
+      - stage
+
 Globals:
   Function:
     Timeout: 5
@@ -9,6 +21,7 @@ Globals:
     Tracing: Active
     Environment:
       Variables:
+        QUEUE_URL: !If [ IsStageEnvironment, !Ref SomeQueue, unkown ]
         STAGE: Production
         TABLE_NAME: global-table
     VpcConfig:
@@ -18,6 +31,9 @@ Globals:
       SubnetIds:
         - subnet-123
         - subnet-456
+
+Conditions:
+  IsStageEnvironment: !Equals [ !Ref EnvironmentType, stage ]
 
 Resources:
   SomeQueue:

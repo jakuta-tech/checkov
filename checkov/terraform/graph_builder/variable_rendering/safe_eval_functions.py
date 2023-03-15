@@ -1,15 +1,16 @@
 import itertools
 import logging
 import re
+from datetime import datetime, timedelta
 from functools import reduce
 from math import ceil, floor, log
 from typing import Union, Any, Dict, Callable, List, Optional
 
-from checkov.terraform.parser_functions import tonumber, FUNCTION_FAILED, create_map, tobool, tomap, tostring
+from checkov.terraform.parser_functions import tonumber, FUNCTION_FAILED, create_map, tobool, tostring
 
 """
 This file contains a custom implementation of the builtin `eval` function.
-`eval` is not a safe function, because it can execute *every* command, 
+`eval` is not a safe function, because it can execute *every* command,
 so this file overrides `eval` and allows only the functions in SAFE_EVAL_DICT.
 
 The functions are an implementation of Terraform's built-in functions
@@ -114,6 +115,146 @@ def wrap_func(f: Callable[..., Any], *args: Any) -> Any:
     return res
 
 
+def update_datetime(dt: datetime, delta: timedelta, adding: bool) -> datetime:
+    if adding is True:
+        dt = dt + delta
+    else:
+        dt = dt - delta
+    return dt
+
+
+def timeadd(input_str: str, time_delta: str) -> str:
+    '''
+    From docs:
+    duration is a string representation of a time difference, consisting of sequences of number and unit pairs,
+     like "1.5h" or "1h30m". The accepted units are "ns", "us" (or "µs"), "ms", "s", "m", and "h".
+     The first number may be negative to indicate a negative duration, like "-2h5m".
+    '''
+
+    # Convert the date to allowing parsing
+    input_str = input_str.replace("Z", "+00:00")
+    dt = datetime.fromisoformat(input_str)
+    adding = True
+    if time_delta[0] == '-':
+        adding = False
+        time_delta = time_delta[1:]
+    # Split out into each of the deltas
+    deltas = re.split(r'(\d*\.*\d+)', time_delta)
+    # Needed to strip the leading empty element
+    deltas = list(filter(None, deltas))
+    while len(deltas) > 0:
+        amount = float(deltas[0])
+        interval = deltas[1]
+        deltas = deltas[2:]
+        delta = timedelta(0)
+        if interval == 'h':
+            delta = timedelta(hours=amount)
+        elif interval == 'm':
+            delta = timedelta(minutes=amount)
+        elif interval == 's':
+            delta = timedelta(seconds=amount)
+        elif interval == 'ms':
+            delta = timedelta(milliseconds=amount)
+        elif interval == 'us' or interval == 'µs':
+            delta = timedelta(microseconds=amount)
+        elif interval == 'ns':  # Crude, but timedelta does not deal with nanoseconds
+            delta = timedelta(microseconds=(amount / 1000))
+
+        dt = update_datetime(dt, delta, adding)
+        
+    return dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def process_formatting_codes(format_str: str, dt: datetime) -> str:
+    format_mapping = {
+        "YYYY": "%Y",
+        "YY": "%y",
+        "MMMM": "%B",
+        "MMM": "%b",
+        "MM": "%m",
+        "M": "%-m",
+        "DD" : "%d",
+        "D" : "%-d",
+        "EEEE" : "%A",
+        "EEE" : "%a",
+        "HH" : "%I",
+        "H" : "%-I",
+        "hh" : "%H",
+        "h" : "%-H",
+        "mm" : "%M",
+        "m" : "%-M",
+        "ss" : "%S",
+        "s" : "%-S",
+        "AA" : "%p",
+        # "aa" : "%p",  # included for completeness but requires separate handling
+        "ZZZZZ" : "%z",
+        "ZZZZ" : "%z",
+        "ZZZ" : "%z",
+        "Z " : "%z"}
+
+    if format_str == 'aa':
+        format_str = dt.strftime('%p').lower()
+    elif format_str == 'ZZZZZ':
+        tz = dt.strftime("%z")
+        format_str = tz[:3] + ":" + tz[3:]
+    elif format_str == 'ZZZ':
+        tz = dt.strftime("%z")
+        if tz == '+0000':
+            tz = 'UTC'
+        format_str = tz
+    elif format_str == 'Z':
+        tz = dt.strftime("%z")
+        if tz == '+0000':
+            tz = 'Z'
+        format_str = tz
+    else:
+        format_str = format_mapping.get(format_str, format_str)
+
+    return format_str
+
+
+def formatdate(format_str: str, input_str: str) -> str:
+    '''
+    From docs: This function is intended for producing common machine-oriented timestamp formats such as
+    those defined in RFC822, RFC850, and RFC1123. It is not suitable for truly human-oriented date
+    formatting because it is not locale-aware.
+    Any non-letter characters, such as punctuation, are reproduced verbatim in the output.
+    To include literal letters in the format string, enclose them in single quotes '.
+    To include a literal quote, escape it by doubling the quotes.
+    Function works through the format string halting on single quotes to process any formatting
+    '''
+
+    # Convert the input str to a date
+    input_str = input_str.replace("Z", "+00:00")
+    dt = datetime.fromisoformat(input_str)
+
+    processed_format_str = ""
+    format_str_segment = ""
+    in_quote = False  # Keep track of whether in formatting or quoted text
+    last_ch = ""  # Used to identify the '' scenario
+    for ch in format_str:
+        if ch == "'" or in_quote is True:
+            if len(format_str_segment) > 0:
+                processed_format_str += process_formatting_codes(format_str_segment, dt)
+                format_str_segment = ""
+            if ch == "'":
+                if last_ch == "'":
+                    processed_format_str += "'"
+                in_quote = not in_quote
+            else:
+                processed_format_str += ch
+        else:
+            if ch != last_ch and last_ch != "":  # new format code and the start of the string
+                processed_format_str += process_formatting_codes(format_str_segment, dt)
+                format_str_segment = ""
+            format_str_segment += ch
+        last_ch = ch
+    if len(format_str_segment) > 0:
+        processed_format_str += process_formatting_codes(format_str_segment, dt)
+
+    return dt.strftime(processed_format_str)
+
+
 SAFE_EVAL_FUNCTIONS: List[str] = []
 SAFE_EVAL_DICT = dict([(k, locals().get(k, None)) for k in SAFE_EVAL_FUNCTIONS])
 
@@ -174,7 +315,7 @@ SAFE_EVAL_DICT["sort"] = sort
 # type conversion
 SAFE_EVAL_DICT["tobool"] = lambda arg: wrap_func(tobool, arg)
 SAFE_EVAL_DICT["tolist"] = lambda *args: list(*args)
-SAFE_EVAL_DICT["tomap"] = lambda arg: wrap_func(tomap, str(arg))
+# SAFE_EVAL_DICT["tomap"] = lambda arg: wrap_func(tomap, str(arg))
 SAFE_EVAL_DICT["tonumber"] = lambda arg: arg if type(arg) in [int, float] else wrap_func(tonumber, arg)
 SAFE_EVAL_DICT["toset"] = lambda origin: set(origin)
 SAFE_EVAL_DICT["tostring"] = lambda arg: arg if isinstance(arg, str) else wrap_func(tostring, str(arg))
@@ -182,10 +323,15 @@ SAFE_EVAL_DICT["tostring"] = lambda arg: arg if isinstance(arg, str) else wrap_f
 # encoding
 SAFE_EVAL_DICT["jsonencode"] = lambda arg: arg
 
+# date functions
+SAFE_EVAL_DICT["timestamp"] = lambda: datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+SAFE_EVAL_DICT["timeadd"] = timeadd
+SAFE_EVAL_DICT["formatdate"] = formatdate
+
 
 def evaluate(input_str: str) -> Any:
     if "__" in input_str:
-        logging.warning(f"got a substring with double underscore, which is not allowed. origin string: {input_str}")
+        logging.debug(f"got a substring with double underscore, which is not allowed. origin string: {input_str}")
         return input_str
     evaluated = eval(input_str, {"__builtins__": None}, SAFE_EVAL_DICT)  # nosec
     return evaluated if not isinstance(evaluated, str) else remove_unicode_null(evaluated)
